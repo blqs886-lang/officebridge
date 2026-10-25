@@ -5,6 +5,42 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { analyzeOffice } from '../src/engine/index.js';
 import { unzipSync, zipSync, strToU8 } from 'fflate';
 import { buildHtmlReport, safeFileName, escapeHtml } from '../src/ui/reports.js';
+import { donationUrl, label as donationLabel, validateDonationUrl } from '../src/support-config.js';
+
+// Windows Edge's own download flyout loads these built-in hosts. These exact
+// scheme/host pairs were observed during download QA; other browser pages fail.
+function isBrowserInternalRequest(request) {
+  if (request.method !== 'GET') return false;
+  try {
+    const url = new URL(request.url);
+    return url.protocol === 'edge:' && !url.username && !url.password && !url.port
+      && ['downloads-hub', 'resources', 'fileicon'].includes(url.hostname);
+  } catch { return false; }
+}
+
+function isDevelopmentServerWebSocket(value, base) {
+  if (!['http:', 'https:'].includes(base.protocol)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === (base.protocol === 'https:' ? 'wss:' : 'ws:')
+      && url.host === base.host && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function isVitePingFrame(frame) {
+  return frame.type === 'text' && frame.payload === '{"type":"ping"}';
+}
+
+function isExpectedAppRequest(request, base, localReports) {
+  try {
+    const url = new URL(request.url);
+    if (['blob:', 'data:'].includes(url.protocol) || localReports.has(url.href)) return true;
+    if (base.protocol === 'file:') return url.href === base.href;
+    if (isDevelopmentServerWebSocket(url.href, base)) return true;
+    return ['http:', 'https:'].includes(base.protocol)
+      && ['http:', 'https:'].includes(url.protocol) && url.origin === base.origin;
+  } catch { return false; }
+}
 
 // Optional browser QA dependency. No production dependency or browser download is required.
 // npm install --no-save playwright OR PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs
@@ -17,13 +53,25 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const baseUrl = process.env.APP_URL || 'http://127.0.0.1:5173/';
 const outputDir = path.join(projectRoot, 'work', 'browser-smoke');
 await fs.mkdir(outputDir, { recursive: true });
-const browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_CHANNEL ? { channel: process.env.BROWSER_CHANNEL } : {}) });
+const browser = await chromium.launch({ headless: true, chromiumSandbox: true, ...(process.env.BROWSER_CHANNEL ? { channel: process.env.BROWSER_CHANNEL } : {}) });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
 const page = await context.newPage();
 const failures = [];
 const requests = [];
-page.on('pageerror', (error) => failures.push(error.message));
-context.on('page', (newPage) => newPage.on('pageerror', (error) => failures.push(error.message)));
+const webSocketConnections = [];
+let requestAudit;
+function watchPage(observedPage) {
+  observedPage.on('pageerror', (error) => failures.push(error.message));
+  observedPage.on('websocket', (socket) => {
+    const connection = { url: socket.url(), sentFrames: [] };
+    webSocketConnections.push(connection);
+    socket.on('framesent', ({ payload }) => connection.sentFrames.push(typeof payload === 'string'
+      ? { type: 'text', payload }
+      : { type: 'binary', payload: Buffer.from(payload).toString('base64') }));
+  });
+}
+watchPage(page);
+context.on('page', watchPage);
 context.on('request', (request) => requests.push({ method: request.method(), url: request.url() }));
 const checks = [];
 const test = async (name, fn) => { await fn(); checks.push(name); console.log(`PASS ${name}`); };
@@ -42,6 +90,19 @@ try {
   await page.locator('#choose-files').waitFor({ state: 'visible' });
   await test('首页可用且没有横向溢出', async () => {
     assert.equal(await page.title(), 'OfficeBridge · 文档兼容工作台');
+    const configuredSupportUrl = validateDonationUrl(donationUrl);
+    if (configuredSupportUrl) {
+      const supportLink = page.locator('#support-link');
+      assert.equal(await supportLink.isVisible(), true);
+      assert.equal(await supportLink.getAttribute('href'), configuredSupportUrl);
+      assert.equal(await supportLink.innerText(), donationLabel.trim());
+      assert.equal(await supportLink.getAttribute('target'), '_blank');
+      const relations = (await supportLink.getAttribute('rel')).split(/\s+/);
+      assert.ok(relations.includes('noopener') && relations.includes('noreferrer'));
+      assert.equal(await page.locator('#support-footer small').innerText(), '自愿支持，不影响免费功能');
+    } else {
+      assert.equal(await page.locator('#support-link, #support-footer').count(), 0, 'Unconfigured donation link must be absent, including any placeholder');
+    }
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: path.join(outputDir, 'desktop-home.png'), fullPage: true });
   });
@@ -323,15 +384,73 @@ try {
     await custom.close();
   });
 
+  await test('样例后添加文件自动切换，原选择与副本保留，无效新增不切换', async () => {
+    const firstUse = await context.newPage();
+    await firstUse.goto(baseUrl);
+    await firstUse.locator('#demo-xlsx').click();
+    await firstUse.locator('#repair-file').waitFor();
+    await firstUse.locator('#select-fixes').click();
+    const selectedCount = await firstUse.locator('[data-issue-id]:checked').count();
+    assert.ok(selectedCount > 0);
+    await firstUse.locator('#repair-file').click();
+    await firstUse.locator('#download-repaired').waitFor();
+    const originalCopyName = await firstUse.locator('.repaired-name').innerText();
+    await firstUse.locator('[data-filter="info"]').click();
+    await firstUse.locator('#file-input').setInputFiles({ name: 'my-first-workbook.xlsx', mimeType: 'application/octet-stream', buffer: await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.xlsx')) });
+    await firstUse.locator('.document-title h2').filter({ hasText: 'my-first-workbook.xlsx' }).waitFor();
+    await firstUse.locator('#repair-file').waitFor();
+    assert.equal(await firstUse.locator('.file-card[aria-pressed="true"] strong').innerText(), 'my-first-workbook.xlsx');
+    assert.equal(await firstUse.locator('[data-filter="all"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await firstUse.locator('[data-issue-id]:checked').count(), 0);
+    assert.equal(await firstUse.locator('#download-repaired').count(), 0);
+    await firstUse.locator('.file-card').filter({ hasText: '季度预算示例.xlsx' }).click();
+    assert.equal(await firstUse.locator('[data-issue-id]:checked').count(), selectedCount);
+    assert.equal(await firstUse.locator('.repaired-name').innerText(), originalCopyName);
+    assert.equal(await firstUse.locator('#download-repaired').isVisible(), true);
+    await firstUse.locator('#file-input').setInputFiles({ name: 'unsupported.txt', mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
+    await firstUse.locator('#toast').filter({ hasText: '目前只支持 PPTX 和 XLSX' }).waitFor();
+    assert.equal(await firstUse.locator('.document-title h2').innerText(), '季度预算示例.xlsx');
+    assert.equal(await firstUse.locator('.file-card').count(), 2);
+    assert.equal(await firstUse.locator('[data-issue-id]:checked').count(), selectedCount);
+    assert.equal(await firstUse.locator('.repaired-name').innerText(), originalCopyName);
+    await firstUse.close();
+  });
+
   await test('检查及修复过程没有文档上传或第三方请求', async () => {
     const base = new URL(baseUrl);
-    const allowedPrefix = base.protocol === 'file:' ? new URL('.', baseUrl).href : base.origin;
-    assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
     const localReports = new Set(['report.html', 'long-path-report.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));
-    assert.deepEqual(requests.filter((request) => !request.url.startsWith(allowedPrefix) && !localReports.has(request.url) && !request.url.startsWith('blob:') && !request.url.startsWith('data:')), []);
+    const excludedBrowserInternalRequests = requests.filter(isBrowserInternalRequest);
+    const checkedRequests = requests.filter((request) => !isBrowserInternalRequest(request));
+    const unexpectedRequests = checkedRequests.filter((request) => !isExpectedAppRequest(request, base, localReports));
+    const externalNetworkRequests = unexpectedRequests.filter((request) => /^(?:https?|wss?):/i.test(request.url));
+    const developmentServerWebSockets = webSocketConnections.filter((connection) => isDevelopmentServerWebSocket(connection.url, base));
+    const unexpectedWebSockets = webSocketConnections.filter((connection) => !isDevelopmentServerWebSocket(connection.url, base));
+    const unexpectedWebSocketFrames = developmentServerWebSockets.flatMap((connection) => connection.sentFrames
+      .filter((frame) => !isVitePingFrame(frame)).map((frame) => ({ url: connection.url, ...frame })));
+    requestAudit = {
+      observedRequestCount: requests.length,
+      checkedRequestCount: checkedRequests.length,
+      excludedBrowserInternalRequestCount: excludedBrowserInternalRequests.length,
+      excludedBrowserInternalRequests,
+      externalNetworkRequestCount: externalNetworkRequests.length,
+      externalNetworkRequests,
+      webSocketConnectionCount: webSocketConnections.length,
+      webSocketConnections,
+      developmentServerWebSocketCount: developmentServerWebSockets.length,
+      developmentServerWebSockets,
+      unexpectedWebSockets,
+      unexpectedWebSocketFrames,
+      unexpectedRequests,
+    };
+    await fs.writeFile(path.join(outputDir, 'request-audit.json'), JSON.stringify(requestAudit, null, 2));
+    console.log(`Request audit: checked ${checkedRequests.length}; excluded ${excludedBrowserInternalRequests.length} Edge internal UI requests; ${developmentServerWebSockets.length} development-server WebSockets. Full list: work/browser-smoke/request-audit.json`);
+    assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
+    assert.deepEqual(unexpectedRequests, []);
+    assert.deepEqual(unexpectedWebSockets, []);
+    assert.deepEqual(unexpectedWebSocketFrames, []);
     assert.deepEqual(failures, []);
   });
-  await fs.writeFile(path.join(outputDir, 'result.json'), JSON.stringify({ passed: checks.length, checks, pageErrors: failures, networkRequests: requests.length }, null, 2));
+  await fs.writeFile(path.join(outputDir, 'result.json'), JSON.stringify({ passed: checks.length, checks, pageErrors: failures, checkedRequestCount: requestAudit.checkedRequestCount, observedRequestCount: requestAudit.observedRequestCount, externalNetworkRequestCount: requestAudit.externalNetworkRequestCount, excludedBrowserInternalRequestCount: requestAudit.excludedBrowserInternalRequestCount, webSocketConnectionCount: requestAudit.webSocketConnectionCount, developmentServerWebSocketCount: requestAudit.developmentServerWebSocketCount, requestAuditFile: 'request-audit.json' }, null, 2));
   console.log(`Browser smoke checks passed: ${checks.length}. Artifacts: work/browser-smoke/`);
 } finally {
   await browser.close();

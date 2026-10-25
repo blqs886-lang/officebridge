@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { XMLSerializer } from '@xmldom/xmldom';
 import { scanXlsx } from '../src/engine/xlsx.js';
-import { NS, parseXml } from '../src/engine/xml.js';
+import { NS, parseXml, escapeAttribute } from '../src/engine/xml.js';
+import { createDemo } from '../src/engine/demo.js';
+import { readArchive, writeArchive } from '../src/engine/archive.js';
+import { analyzeOffice, repairOffice } from '../src/engine/index.js';
 
 const S = NS.s;
 const A = NS.a;
@@ -260,4 +263,70 @@ test('symbol and mathematical declarations block substitutions even when custom 
   assert.ok(warnings.some(item => item.title.includes('Helvetica')));
   // Known mathematical/symbol families may stay quiet when the shared font
   // policy already suppresses their mappings; they must never become fixes.
+});
+
+test('local, relative, UNC and localhost spreadsheet hyperlinks are actionable dependencies', () => {
+  const targets = [
+    'file:///Users/example/Documents/attachment.pdf', '/Users/example/attachment.pdf',
+    '../attachments/说明.pdf', '\\\\server\\share\\attachment.pdf',
+    'http://localhost:8080/report', 'https://reports.localhost/report',
+    'http://127.0.0.1:8080/report', 'http://[::1]:8080/report',
+  ];
+  const rels = targets.map((target, i) => `<Relationship Id="r${i}" Type="${NS.r}/hyperlink" Target="${escapeAttribute(target)}" TargetMode="External"/>`).join('');
+  const report = inspect({
+    'xl/workbook.xml': workbook('<sheets><sheet name="附件列表" sheetId="1" r:id="sheet"/></sheets>'),
+    'xl/_rels/workbook.xml.rels': `<Relationships xmlns="${NS.rel}"><Relationship Id="sheet" Type="${NS.r}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+    'xl/worksheets/sheet1.xml': sheet(`<sheetData/><hyperlinks xmlns:r="${NS.r}">${targets.map((_, i) => `<hyperlink ref="A${i + 1}" r:id="r${i}"/>`).join('')}</hyperlinks>`),
+    'xl/worksheets/_rels/sheet1.xml.rels': `<Relationships xmlns="${NS.rel}">${rels}</Relationships>`,
+  });
+  const found = report.issues.filter(item => item.code === 'EXTERNAL_RESOURCE_RELATIONSHIP');
+  assert.equal(found.length, targets.length);
+  targets.forEach((target, i) => {
+    assert.ok(found.some(item => item.location === `附件列表 · A${i + 1}` && item.evidence.endsWith(target)));
+  });
+  assert.ok(found.every(item => item.severity === 'warning' && !item.fixable));
+  assert.ok(!codes(report).includes('EXTERNAL_WEB_HYPERLINK'));
+});
+
+test('ordinary web links are informational, linked images remain dependencies, and internal links stay quiet', () => {
+  const report = inspect({
+    'xl/worksheets/_rels/sheet1.xml.rels': `<Relationships xmlns="${NS.rel}">
+      <Relationship Id="web" Type="${NS.r}/hyperlink" Target="https://example.invalid/reference" TargetMode="External"/>
+      <Relationship Id="mail" Type="${NS.r}/hyperlink" Target="mailto:help@example.invalid" TargetMode="External"/>
+      <Relationship Id="phone" Type="${NS.r}/hyperlink" Target="tel:+1234567890" TargetMode="External"/>
+      <Relationship Id="internal" Type="${NS.r}/hyperlink" Target="#A1"/>
+    </Relationships>`,
+    'xl/drawings/_rels/drawing1.xml.rels': `<Relationships xmlns="${NS.rel}"><Relationship Id="image" Type="${NS.r}/image" Target="https://example.invalid/logo.png" TargetMode="External"/></Relationships>`,
+  });
+  const web = report.issues.filter(item => item.code === 'EXTERNAL_WEB_HYPERLINK');
+  assert.equal(web.length, 3);
+  assert.ok(web.every(item => item.severity === 'info' && !item.fixable));
+  assert.ok(web.every(item => item.description.includes('本身不是兼容性错误')));
+  const resource = issue(report, 'EXTERNAL_RESOURCE_RELATIONSHIP');
+  assert.equal(resource.severity, 'warning');
+  assert.equal(resource.location, 'xl/drawings/drawing1.xml');
+  assert.match(resource.evidence, /logo\.png/);
+  assert.equal(report.issues.length, 4);
+});
+
+test('real-package hyperlink diagnostics survive font repair without changing links or worksheet bytes', async () => {
+  const entries = readArchive(createDemo('xlsx')).entries;
+  const encoder = new TextEncoder(), decoder = new TextDecoder();
+  const sheetPart = 'xl/worksheets/sheet1.xml', relPart = 'xl/worksheets/_rels/sheet1.xml.rels';
+  const links = `<hyperlinks xmlns:r="${NS.r}"><hyperlink ref="A2" r:id="local"/><hyperlink ref="A3" r:id="web"/></hyperlinks>`;
+  entries.set(sheetPart, encoder.encode(decoder.decode(entries.get(sheetPart)).replace('<printOptions', `${links}<printOptions`)));
+  entries.set(relPart, encoder.encode(`<Relationships xmlns="${NS.rel}"><Relationship Id="local" Type="${NS.r}/hyperlink" Target="file:///Users/example/attachment.pdf" TargetMode="External"/><Relationship Id="web" Type="${NS.r}/hyperlink" Target="https://example.invalid/reference" TargetMode="External"/></Relationships>`));
+  const bytes = writeArchive(entries), original = bytes.slice();
+  const report = await analyzeOffice(bytes, 'attachments.xlsx');
+  assert.equal(report.repairBlocked, false);
+  assert.equal(report.inventory.externalRelationshipCount, 2);
+  assert.equal(issue(report, 'EXTERNAL_RESOURCE_RELATIONSHIP').location, '预算示例 · A2');
+  assert.equal(issue(report, 'EXTERNAL_WEB_HYPERLINK').location, '预算示例 · A3');
+  const repaired = await repairOffice(bytes, 'attachments.xlsx', { selectedIssueIds: report.issues.filter(item => item.fixable).map(item => item.id) });
+  const after = readArchive(repaired.bytes).entries;
+  assert.deepEqual(after.get(relPart), entries.get(relPart));
+  assert.deepEqual(after.get(sheetPart), entries.get(sheetPart));
+  assert.deepEqual(bytes, original);
+  assert.ok(issue(repaired.report, 'EXTERNAL_RESOURCE_RELATIONSHIP'));
+  assert.ok(issue(repaired.report, 'EXTERNAL_WEB_HYPERLINK'));
 });

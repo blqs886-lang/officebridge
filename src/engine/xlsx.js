@@ -30,6 +30,17 @@ function isTrue(value) { return TRUE.has(value); }
 function sample(items) { return items.slice(0, 12).join('、') + (items.length > 12 ? ` 等 ${items.length} 处` : ''); }
 function compact(text, length = 160) { return text.length > length ? `${text.slice(0, length)}…` : text; }
 
+function isWebHyperlink(target) {
+  let url;
+  try { url = new URL(target); } catch { return false; }
+  if (['mailto:', 'tel:'].includes(url.protocol)) return true;
+  if (!['http:', 'https:'].includes(url.protocol)) return false;
+  const host = url.hostname.replace(/\.$/, '').toLowerCase();
+  // A loopback URL names the recipient's own machine, not the sender's service.
+  return host && host !== 'localhost' && !host.endsWith('.localhost')
+    && !/^127\./.test(host) && host !== '[::1]' && host !== '0.0.0.0';
+}
+
 function resolvePart(base, target) {
   const pieces = target.startsWith('/') ? [] : base.split('/').slice(0, -1);
   for (const piece of target.replace(/\\/g, '/').split('/')) {
@@ -385,8 +396,40 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory) {
 }
 
 function scanPackageFeatures(ctx, add, inventory) {
+  const names = worksheetNames(ctx.xml);
   for (const [part, doc] of ctx.xml) {
     if (!part.startsWith('xl/')) continue;
+    if (part.endsWith('.rels')) {
+      const source = part.replace(/(^|\/)_rels\/([^/]+)\.rels$/, '$1$2');
+      const cellRefs = new Map();
+      for (const link of elements(ctx.xml.get(source), NS.s, 'hyperlink')) {
+        const id = link.getAttributeNS(NS.r, 'id');
+        if (!id) continue;
+        const refs = cellRefs.get(id) ?? [];
+        refs.push(attribute(link, 'ref'));
+        cellRefs.set(id, refs);
+      }
+      for (const relationship of elements(doc, NS.rel, 'Relationship')) {
+        if (attribute(relationship, 'TargetMode') !== 'External') continue;
+        const target = attribute(relationship, 'Target');
+        const id = attribute(relationship, 'Id');
+        const isOrdinaryLink = attribute(relationship, 'Type').endsWith('/hyperlink') && isWebHyperlink(target);
+        const refs = cellRefs.get(id) ?? [];
+        const location = names.has(source) ? `${names.get(source)}${refs.length ? ` · ${sample(refs)}` : ''}` : source;
+        add(isOrdinaryLink ? 'EXTERNAL_WEB_HYPERLINK' : 'EXTERNAL_RESOURCE_RELATIONSHIP', part, {
+          severity: isOrdinaryLink ? 'info' : 'warning',
+          title: isOrdinaryLink ? '包含需要外部访问的超链接' : '包含工作簿之外的文件或资源依赖',
+          description: isOrdinaryLink
+            ? '普通网页、邮件或电话链接本身不是兼容性错误。使用时仍取决于目标电脑的网络、权限及可用应用。'
+            : '本机或相对文件路径、局域网位置、本机服务及外链图片等资源不会随工作簿自动搬到另一台电脑。换电脑后可能无法访问，当前没有验证链接是否有效。',
+          location, evidence: `${id} → ${compact(target, 800)}`,
+          recommendation: isOrdinaryLink
+            ? '需要使用链接时，在目标环境确认可以访问。工具不会打开或改写链接。'
+            : '在原始 Excel 中确认资源来源，与接收方一起准备所需文件或资源，再在目标电脑测试。工具保留链接，不会下载、嵌入或修改它。',
+        });
+      }
+      continue;
+    }
     if (/^xl\/externalLinks\/externalLink\d+\.xml$/i.test(part)) {
       inventory.externalLinks += 1;
       add('EXTERNAL_LINK_PART', part, {

@@ -35,9 +35,21 @@ for (const file of manifest.sourceFiles) {
   assert.equal(hash(await fs.readFile(path.join(root, file.path))), file.sha256, `Source changed after packaging: ${file.path}`);
 }
 for (const required of ['package.json', 'package-lock.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
-  'scripts/package-release.mjs', 'scripts/build-portable.mjs', 'src/engine/index.js', 'src/main.js']) assert.ok(source.has(`${prefix}/${required}`));
+  'README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'CHANGELOG.md', 'docs/QUICKSTART.md',
+  'docs/DONATIONS.md', '.github/FUNDING.yml', 'src/support-config.js', 'tests/support.test.js',
+  'docs/ARCHITECTURE.md', 'docs/ENGINE-CONTRACT.md', 'docs/PUBLISHING.md', 'docs/TESTING.md', 'docs/WINDOWS-VERIFICATION.md',
+  'scripts/package-release.mjs', 'scripts/build-portable.mjs', 'scripts/verify-release.mjs',
+  'src/engine/index.js', 'src/main.js']) assert.ok(source.has(`${prefix}/${required}`), `Missing required source entry: ${required}`);
 const portable = readArchive(new Uint8Array(await fs.readFile(path.join(release, `${prefix}-portable.zip`)))).entries;
-assert.deepEqual(portable.get('OfficeBridge.html'), new Uint8Array(await fs.readFile(path.join(release, 'OfficeBridge.html'))));
-assert.ok(portable.has('LICENSE') && portable.has('THIRD_PARTY_NOTICES.md'));
-assert.ok(portable.has('scripts/verify-windows.ps1') && portable.has('docs/WINDOWS-VERIFICATION.md'));
+const portableSources = new Map([
+  ['OfficeBridge.html', path.join(release, 'OfficeBridge.html')],
+  ['START-HERE.txt', path.join(release, 'START-HERE.txt')],
+  ...['LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/QUICKSTART.md', 'docs/WINDOWS-VERIFICATION.md', 'docs/TESTING.md',
+    'scripts/verify-windows.ps1', 'public/examples/officebridge-demo.pptx', 'public/examples/officebridge-demo.xlsx']
+    .map(file => [file, path.join(root, file)]),
+]);
+assert.deepEqual([...portable.keys()].sort(), [...portableSources.keys()].sort(), 'Portable archive entries do not match the required file set');
+for (const [file, original] of portableSources) {
+  assert.deepEqual(portable.get(file), new Uint8Array(await fs.readFile(original)), `Portable content differs from its source: ${file}`);
+}
 console.log(`Verified ${manifest.sourceFiles.length} source files, ${portable.size} portable entries and ${lines.length} artifact checksums.`);

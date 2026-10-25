@@ -6,7 +6,7 @@ v0.1.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是�
 
 ## 直接使用
 
-打开发布目录中的 [`release/OfficeBridge.html`](release/OfficeBridge.html)。这是包含所需代码和样例的单个 HTML 文件，无需安装 Node.js 或 Office，可断网使用。请使用可信来源的发布文件。
+从 [GitHub Releases](https://github.com/blqs886-lang/officebridge/releases) 下载名称含 **portable.zip** 的便携包，完整解压，用 Chrome 或 Windows Edge 打开其中的 `OfficeBridge.html`。这是包含所需代码和样例的单个 HTML 文件，无需安装 Node.js 或 Office，可断网使用。
 
 如果拿到的是源码 ZIP，解压后先按下方“开发与构建”生成这个文件；源码包不重复包含发布产物。便携 ZIP 则可直接解压并打开其中的 `OfficeBridge.html`。
 
@@ -15,7 +15,7 @@ v0.1.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是�
 3. 阅读风险说明、证据和建议。警告表示需要核对，不等于已经发生错误。
 4. 需要改字体时，再主动勾选具体建议；**默认全部不选**。也可在高级选项中指定原字体与目标字体，再重新检查。目标电脑仍须有相应字体。
 5. 下载检查报告；采用替换后，另行下载 `.windows.pptx` / `.windows.xlsx` 副本及变更报告。保留原件。
-6. 在接收方实际使用的 Windows 软件中打开，核对版面、文字、公式和播放效果。见 [Windows 实际验证说明](docs/WINDOWS-VERIFICATION.md)。
+6. 在接收方实际使用的 Windows 软件中打开，核对版面、文字、公式和播放效果。见 [完整使用指南与常见问题](docs/QUICKSTART.md) 和 [Windows 实际验证说明](docs/WINDOWS-VERIFICATION.md)。
 
 字体替换可能改变字宽、换行及外观；工具不会安装或嵌入字体，不证明字体授权，也不会猜测已经丢失的文字。
 
@@ -27,7 +27,7 @@ v0.1.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是�
 | PPTX 其他内容 | 外部资源、媒体、嵌入对象、动画、部分图形效果及字符风险 | 不改写；不把幻灯片或对象转成图片 |
 | PPTX 文本边界 | 有限坐标和显式字号的启发式提示 | 不移动文本框，不自动调整字号 |
 | XLSX 字体 | 单元格样式、富文本及 DrawingML 字体 | 仅主动选择的字体名称替换 |
-| XLSX 数据与功能 | 公式版本及外部依赖、日期系统、长数值与前导零等风险 | 不改公式、数值、日期、链接或打印设置 |
+| XLSX 数据与功能 | 公式版本及外部依赖、本机文件与外链图片、日期系统、长数值与前导零等风险 | 不改公式、数值、日期、链接或打印设置 |
 | 已签名或含宏内容 | 安全可读取时提供有限检查 | 禁止修复 |
 | Strict OOXML | 有限只读检查 | 禁止修复 |
 | Keynote、Numbers、Pages、DOCX、PDF、CSV、旧版 Office 文件 | 当前不支持 | 不处理 |
@@ -37,8 +37,8 @@ v0.1.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是�
 
 ### 怎样理解验证状态
 
-- 已完成 macOS 上 Chrome 的浏览器流程检查，以及自动化规则、保真和异常输入测试。
-- 面向现代 Chrome / Edge 提供使用入口；**Edge、其他浏览器和 Windows 浏览器环境尚未实际验证**。
+- 已完成 macOS Chrome 155 与 Windows 11 Edge 156 的离线浏览器完整流程检查，各 15 组通过。
+- Mac 自动测试 114 项通过；Windows 自动测试 112 项通过、2 项因平台不适用跳过，均无失败。没有观察到文档上传或第三方网络请求。具体环境和范围见 [测试记录](docs/TESTING.md)。
 - **尚未在真实 Windows 桌面 Office 中完成打开、编辑、版面或播放验证。** 报告中的 `windowsOfficeTested` 固定为 `false`。
 - 可选的 Windows PowerShell 验证脚本需要目标电脑上已安装的桌面 Office；它仍属于实验功能，打开成功也不代表版面一致或公式正确。
 
@@ -68,7 +68,7 @@ npm run release:local
 npm run release:verify
 ```
 
-本地发布命令在 `release/` 整理单 HTML、便携 ZIP、源码 ZIP 与校验清单；验证命令核对包内源码、当前工作区和 SHA-256。详见 [GitHub 发布步骤](docs/PUBLISHING.md)。当前尚未假定已存在的公开仓库或下载地址；请以实际拿到的本地发布文件为准。
+本地发布命令在 `release/` 整理单 HTML、便携 ZIP、源码 ZIP 与校验清单；验证命令核对包内源码、全部便携文件、当前工作区和 SHA-256。公开仓库为 [blqs886-lang/officebridge](https://github.com/blqs886-lang/officebridge)，详见 [GitHub 发布步骤](docs/PUBLISHING.md)。
 
 ## 命令行批量使用
 
@@ -89,3 +89,5 @@ node scripts/cli.mjs --help
 [架构](docs/ARCHITECTURE.md) · [引擎接口](docs/ENGINE-CONTRACT.md) · [测试记录](docs/TESTING.md) · [贡献指南](CONTRIBUTING.md) · [更新记录](CHANGELOG.md)
 
 本项目代码采用 [MIT License](LICENSE)。第三方依赖遵循各自许可，详见 [第三方许可](THIRD_PARTY_NOTICES.md)。本项目不分发专有字体。
+
+OfficeBridge 免费开源，赞助完全自愿，不影响功能。PayPal 支持入口已预留，维护者配置自己的公开收款链接后才会显示；当前未启用收款。见 [赞助配置说明](docs/DONATIONS.md)。

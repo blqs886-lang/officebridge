@@ -1,6 +1,7 @@
 import './style.css';
 import EngineWorker from './ui/worker.js?worker&inline';
 import { escapeHtml, formatBytes, safeFileName, exportPayload, buildHtmlReport, downloadBlob } from './ui/reports.js';
+import { donationUrl, label as donationLabel, validateDonationUrl } from './support-config.js';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 const MAX_FILES = 20;
@@ -91,6 +92,9 @@ function icon(name, className = '') {
   return `<svg class="icon ${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.file}</svg>`;
 }
 const esc = escapeHtml;
+const supportUrl = validateDonationUrl(donationUrl);
+const supportLabel = typeof donationLabel === 'string' && donationLabel.trim() ? donationLabel.trim() : '请我喝杯咖啡';
+const supportFooter = supportUrl ? `<div class="support-footer" id="support-footer"><a id="support-link" href="${esc(supportUrl)}" target="_blank" rel="noopener noreferrer">${esc(supportLabel)}</a><small>自愿支持，不影响免费功能</small></div>` : '';
 
 document.querySelector('#app').innerHTML = `
   <a class="skip-link" href="#workspace">跳到工作台</a>
@@ -105,7 +109,7 @@ document.querySelector('#app').innerHTML = `
     <section id="workspace" class="workspace" aria-label="文档工作台" tabindex="-1"><aside class="queue-panel"><div class="panel-label"><h2>文件列表 <span id="file-count">0</span></h2><button id="clear-files" class="subtle-button" hidden>清空</button></div><div id="file-list" class="file-list"></div><div class="queue-footer">${icon('shield')}<p>原文件始终保持不变。<br>关闭或刷新页面会清空本次工作台。</p></div></aside><div id="document-panel" class="document-panel" aria-live="off"></div></section>
     <section class="verification" id="verification" aria-labelledby="verification-title"><div class="verification-heading"><span class="section-kicker">最后一步，在目标电脑确认</span><h2 id="verification-title">自动检查之后，交接之前。</h2><p>结构检查能减少风险，但不能替代 Windows Office 实际打开验证。</p></div><div class="verification-steps"><div><span class="step-number">01</span><h3>打开修复副本</h3><p>用收件人实际使用的 Windows Office 或 WPS 版本打开文件。</p></div><div><span class="step-number">02</span><h3>检查外观与功能</h3><p>核对字体、换行和图表；试播动画，复核公式、日期及外部链接。</p></div><div><span class="step-number">03</span><h3>保存后再打开</h3><p>确认文件仍然可编辑。需要固定外观时，再附一份从原稿导出的 PDF。</p></div></div><details class="scope-details"><summary>这个工具可以处理什么？有哪些边界？</summary><div><p><strong>可以：</strong>检查当前规则覆盖的字体、对象、外链、公式及文档结构风险；经你确认后替换有明确映射建议的字体，并记录每一项修改。文档继续保留原有文本、公式和可编辑对象。</p><p><strong>仍需人工确认：</strong>字体替换可能改变换行和布局。字体可用性取决于目标电脑及 Office 安装；动画、宏、插件、链接、嵌入对象等不能靠此工具保证兼容。未知字体需由你指定目标字体，再确认是否采用替换。</p><p><strong>支持范围：</strong>未加密的标准 PPTX / XLSX。签名文件、宏文件、加密文件及存在危险结构的文件不会自动修复。Keynote、Numbers、Pages、旧版 PPT / XLS 需要先从原始软件导出。</p><p><strong>隐私：</strong>文件内容由浏览器本机处理，不传到服务器。报告可能包含文件名、字体和文档部件路径，分享前请检查。</p></div></details></section>
   </main>
-  <footer class="site-footer"><span class="footer-brand">OfficeBridge</span><p>保留编辑能力，认真对待每一次交接。</p><span>结构检查 ≠ Windows 实测</span></footer>
+  <footer class="site-footer"><span class="footer-brand">OfficeBridge</span><p>保留编辑能力，认真对待每一次交接。</p>${supportFooter}<span>结构检查 ≠ Windows 实测</span></footer>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 `;
@@ -156,7 +160,7 @@ function announce(message) { document.querySelector('#announcer').textContent = 
 
 function enqueue(files, demo = false) {
   const errors = [];
-  let added = 0;
+  const added = [];
   for (const file of Array.from(files)) {
     if (state.records.length >= MAX_FILES) { errors.push('每次工作台最多保留 20 个文件，请先清空已完成的列表。'); break; }
     if (!/\.(pptx|xlsx)$/i.test(file.name)) { errors.push(`${file.name}：目前只支持 PPTX 和 XLSX。`); continue; }
@@ -167,11 +171,17 @@ function enqueue(files, demo = false) {
     }
     const record = { id: String(nextRecord++), file, name: file.name, format: file.name.split('.').pop().toLowerCase(), status: 'queued', report: null, selected: new Set(), repaired: null, error: null, demo, options: { fontProfile: 'windows-office', fontMappings: {} }, advancedOpen: false, reanalysisError: null };
     state.records.push(record);
-    if (!state.activeId) state.activeId = record.id;
-    added++;
+    added.push(record);
   }
   if (errors.length) toast(errors.slice(0, 3).join(' '), 'error');
-  if (added) { announce(`已添加 ${added} 个文件，即将开始本机检查。`); render(); processQueue(); }
+  if (added.length) {
+    state.activeId = added[0].id;
+    state.filter = 'all';
+    announce(`已添加 ${added.length} 个文件，即将开始本机检查。`);
+    render();
+    processQueue();
+  }
+  return added;
 }
 
 async function processQueue() {
@@ -204,10 +214,8 @@ async function loadDemo(format) {
   try {
     const bytes = await request('demo', { format });
     const name = format === 'pptx' ? '跨系统交接示例.pptx' : '季度预算示例.xlsx';
-    enqueue([new File([bytes], name)], true);
-    state.activeId = state.records.at(-1)?.id || state.activeId;
-    render();
-    document.querySelector('#workspace').scrollIntoView({ behavior: reducedMotion() ? 'instant' : 'smooth', block: 'start' });
+    const added = enqueue([new File([bytes], name)], true);
+    if (added.length) document.querySelector('#workspace').scrollIntoView({ behavior: reducedMotion() ? 'instant' : 'smooth', block: 'start' });
   } catch (error) { toast(error.message, 'error'); }
   finally {
     state.demoBusy = false;
