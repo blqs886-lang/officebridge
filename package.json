@@ -1,0 +1,24 @@
+{
+  "name": "officebridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private, editable-first PPTX and XLSX compatibility inspection and conservative repair",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.12" },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "build:portable": "node scripts/build-portable.mjs",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/*.test.js",
+    "check": "npm test && npm run build",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "licenses": "node scripts/update-notices.mjs",
+    "cli": "node scripts/cli.mjs",
+    "release:local": "node scripts/package-release.mjs",
+    "release:verify": "node scripts/verify-release.mjs"
+  },
+  "dependencies": { "@xmldom/xmldom": "0.9.12", "fflate": "0.8.3" },
+  "devDependencies": { "vite": "8.3.5" }
+}

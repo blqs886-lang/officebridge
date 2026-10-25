@@ -1,0 +1,16 @@
+node_modules/
+dist/
+work/
+release/
+.DS_Store
+*.log
+.env*
+!.env.example
+coverage/
+officebridge-reports/
+*.report.json
+*.兼容报告.json
+*.兼容报告.html
+*.windows.[pP][pP][tT][xX]
+*.windows.[xX][lL][sS][xX]
+~$*

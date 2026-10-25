@@ -1,0 +1,64 @@
+name: Test and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    name: Node 24 · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Test engine, privacy boundaries and command-line behavior
+        run: npm test
+      - name: Build web application
+        run: npm run build
+      - name: Build portable application
+        run: npm run build:portable
+      - name: Parse optional Windows checker using Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw 'This syntax check must use Windows PowerShell 5.1.'
+          }
+          $script = (Resolve-Path '.\scripts\verify-windows.ps1').Path
+          $bytes = [IO.File]::ReadAllBytes($script)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+            throw 'Preserve the UTF-8 BOM so Windows PowerShell 5.1 reads Chinese messages correctly.'
+          }
+          $tokens = $null
+          $parseErrors = $null
+          [void][Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Format-List
+            throw 'Windows checker syntax validation failed.'
+          }
+          Write-Host 'Syntax only: Office was not started; no Windows Office compatibility result is claimed.'
+      # Deliberately no publish step and no artifact upload. In particular,
+      # work/ may contain private local documents and must never be uploaded.
