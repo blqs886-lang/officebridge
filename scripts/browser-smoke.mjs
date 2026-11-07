@@ -416,6 +416,55 @@ try {
     await firstUse.close();
   });
 
+  await test('目标字体名单能筛选修复、保存再导入，每个文稿独立使用', async () => {
+    const sheet = await context.newPage();
+    await sheet.goto(baseUrl);
+    await sheet.locator('#demo-xlsx').click();
+    await sheet.locator('#font-settings > summary').click();
+    const importList = buffer => sheet.locator('#font-list-input').setInputFiles({
+      name: 'windows-fonts.txt', mimeType: 'text/plain', buffer,
+    });
+    await importList(Buffer.from('Arial\r\nPingFang SC\r\nPrivate QA unreferenced family'));
+    await sheet.locator('#font-comparison').waitFor();
+    const choices = sheet.locator('[data-issue-id]');
+    assert.ok(await choices.count() > 0);
+    assert.ok((await sheet.locator('.font-map').allTextContents()).every(s => s.includes('Arial') && !s.includes('Microsoft YaHei')));
+    assert.equal(await sheet.locator('[data-issue-id]:checked').count(), 0);
+    await sheet.setViewportSize({ width: 320, height: 740 });
+    assert.ok(await sheet.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    const save = async (selector, file) => {
+      const waiting = sheet.waitForEvent('download');
+      await sheet.locator(selector).click();
+      const download = await waiting;
+      const target = path.join(outputDir, file);
+      await download.saveAs(target);
+      return fs.readFile(target);
+    };
+    const list = await save('#save-font-list', 'target-list.txt');
+    assert.match(list.toString(), /Private QA unreferenced family/);
+    await sheet.locator('#select-fixes').click();
+    await sheet.locator('#repair-file').click();
+    await sheet.locator('#download-repaired').waitFor();
+    const json = (await save('#download-json', 'target-report.json')).toString();
+    assert.doesNotMatch(json, /Private QA/);
+    const payload = JSON.parse(json);
+    assert.ok(payload.repair.changes.every(change => change.after === 'Arial'));
+    assert.ok(payload.repair.report.inventory.targetFontComparison.listed.includes('Arial'));
+    await importList(Buffer.from([0xff, 0x51]));
+    await sheet.locator('.font-settings-error').waitFor();
+    assert.ok(await sheet.locator('#download-repaired').isVisible(), 'Invalid import must retain the last good output');
+    await sheet.locator('#remove-font-list').click();
+    await sheet.waitForFunction(() => !document.querySelector('#font-comparison') && !document.querySelector('#choose-font-list').disabled);
+    assert.equal(await sheet.locator('#download-repaired').count(), 0);
+    assert.ok((await sheet.locator('.font-map').allTextContents()).some(s => s.includes('Microsoft YaHei')));
+    await importList(list);
+    await sheet.locator('#font-comparison').waitFor();
+    await sheet.locator('#demo-pptx').click();
+    await sheet.locator('#font-settings > summary').click();
+    assert.equal(await sheet.locator('#font-comparison').count(), 0);
+    await sheet.close();
+  });
+
   await test('检查及修复过程没有文档上传或第三方请求', async () => {
     const base = new URL(baseUrl);
     const localReports = new Set(['report.html', 'long-path-report.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));

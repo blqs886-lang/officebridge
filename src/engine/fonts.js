@@ -1,3 +1,5 @@
+import { listedFont, normalizeTargetFonts } from './target-fonts.js';
+
 // Targets are common on Windows/Office, not evidence about a particular PC.
 // Never embed proprietary font binaries or substitute math/symbol families.
 const mappings = new Map([
@@ -27,8 +29,8 @@ const known = new Set([
   'MS Mincho', 'MS PMincho', 'Meiryo', 'Yu Gothic', 'Yu Mincho', 'Malgun Gothic',
 ].map(s => s.toLowerCase()));
 
-export function isKnownFont(name) {
-  return !name?.trim() || /^\+(?:mj|mn)-/.test(name) || known.has(name.trim().toLowerCase());
+export function isKnownFont(name, options = {}) {
+  return !name?.trim() || /^\+(?:mj|mn)-/.test(name) || (options.targetFonts ? listedFont(options.targetFonts, name) : known.has(name.trim().toLowerCase()));
 }
 
 export function isProtectedFont(name) {
@@ -57,21 +59,25 @@ export function normalizeFontOptions(options = {}) {
     if (Object.hasOwn(fontMappings, clean)) throw new Error('自定义字体规则含有重复名称。');
     fontMappings[clean] = to;
   }
-  return { ...options, fontProfile: 'windows-office', fontMappings };
+  const targetFonts = options.targetFonts == null ? undefined : normalizeTargetFonts(options.targetFonts);
+  return { ...options, targetFonts, fontProfile: 'windows-office', fontMappings };
 }
 
 export function fontAdvice(name, options = {}) {
   if (!name || /^\+(?:mj|mn)-/.test(name) || isProtectedFont(name)) return null;
   const clean = name.trim();
   const custom = Object.hasOwn(options.fontMappings || {}, clean) ? options.fontMappings[clean] : undefined;
+  if (options.targetFonts && !custom && listedFont(options.targetFonts, clean)) return null;
   const value = custom ?? mappings.get(clean.toLowerCase());
   if (value === undefined) return null;
   const to = validName(value);
   if (isProtectedFont(to)) throw new Error('符号、数学或图标字体不能作为普通字体替换目标。');
-  if (to === clean) return null;
+  if (to.toLowerCase() === clean.toLowerCase() || (options.targetFonts && !listedFont(options.targetFonts, to))) return null;
   return {
     to,
-    reason: custom
+    reason: options.targetFonts
+      ? '目标字体名称已在导入的名单中找到，仍需核对实际字形和换行。'
+      : custom
       ? '使用你指定的目标字体；请确认 Windows 电脑已安装该字体并检查版面。'
       : '此字体常见于 Mac；Windows 可能缺少。可替换为目标环境常见字体，但字宽、换行和外观可能变化。',
     confidence: 'medium',

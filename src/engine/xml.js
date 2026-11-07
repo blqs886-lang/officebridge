@@ -86,44 +86,56 @@ export function escapeAttribute(value, quote = '"') {
     .replaceAll(quote, quote === '"' ? '&quot;' : '&apos;');
 }
 
+const drawingFontElements = new Set(['latin', 'ea', 'cs', 'sym', 'buFont', 'font']);
+const strictDrawing = 'http://purl.oclc.org/ooxml/drawingml/main';
+
+export function fontAttribute(node) {
+  if ((node.namespaceURI === NS.a || node.namespaceURI === strictDrawing)
+    && drawingFontElements.has(node.localName)) return 'typeface';
+  if (node.namespaceURI !== NS.s || node.parentNode?.namespaceURI !== NS.s) return null;
+  if (node.localName === 'name' && node.parentNode.localName === 'font') return 'val';
+  if (node.localName === 'rFont' && node.parentNode.localName === 'rPr') return 'val';
+  return null;
+}
+
 // Token offsets and DOM namespaces together allow changing ONLY the chosen
 // attribute values. Unknown namespaces, whitespace, comments, CDATA, Alternate-
 // Content, formulas and text stay byte-for-byte intact after re-encoding.
 export function replaceFontAttributes(text, doc, fixes) {
   const nodes = Array.from(doc.getElementsByTagName('*'));
-  const tokens = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/[\s\S]*?>|<([A-Za-z_][\w.:-]*)(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-  const replacements = [];
+  // XML names may contain non-ASCII characters, even in opaque extensions.
+  const tokens = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/[\s\S]*?>|<([^\s/><!?]+)(?:[^>"']|"[^"]*"|'[^']*')*>/gu;
+  const attributes = /\s+([^\s=/>]+)\s*=\s*(["'])([\s\S]*?)\2/gu;
+  const lookup = new Map();
   const counts = new Map();
-  let index = 0;
+  for (const fix of fixes) {
+    const key = fix.scope + '\0' + fix.from;
+    if (lookup.has(key)) throw new Error('修复规则冲突，未写入文件。');
+    lookup.set(key, fix);
+  }
+
+  // Append slices from the original once, including all untouched bytes of
+  // each altered part. Never re-scan text inserted by a prior replacement.
+  const output = [];
+  let index = 0, offset = 0;
   for (const match of text.matchAll(tokens)) {
     if (!match[1]) continue;
     const node = nodes[index++];
     if (!node || node.nodeName !== match[1]) throw new Error('XML 位置核对失败，未写入修复。');
-    for (const fix of fixes) {
-      if (node.namespaceURI !== fix.scope) continue;
-      let key = null;
-      if (node.namespaceURI === NS.a || node.namespaceURI === 'http://purl.oclc.org/ooxml/drawingml/main') {
-        if (node.hasAttribute('typeface')) key = 'typeface';
-      } else if (node.namespaceURI === NS.s && (node.localName === 'rFont'
-        || (node.localName === 'name' && node.parentNode?.namespaceURI === NS.s && node.parentNode.localName === 'font'))) key = 'val';
-      if (!key || node.getAttribute(key) !== fix.from) continue;
-      const attrPattern = /\s([A-Za-z_][\w.:-]*)\s*=\s*(["'])([\s\S]*?)\2/g;
-      for (const attr of match[0].matchAll(attrPattern)) {
-        if (attr[1] !== key) continue;
-        const quoteIndex = attr[0].indexOf(attr[2]);
-        const start = match.index + attr.index + quoteIndex + 1;
-        replacements.push({ start, end: start + attr[3].length, value: escapeAttribute(fix.to, attr[2]) });
-        counts.set(fix.issueId, (counts.get(fix.issueId) || 0) + 1);
-      }
+    const key = fontAttribute(node);
+    if (!key || !node.hasAttribute(key)) continue;
+    const fix = lookup.get(node.namespaceURI + '\0' + node.getAttribute(key));
+    if (!fix) continue;
+    for (const attr of match[0].matchAll(attributes)) {
+      if (attr[1] !== key) continue;
+      const start = match.index + attr.index + attr[0].indexOf(attr[2]) + 1;
+      output.push(text.slice(offset, start), escapeAttribute(fix.to, attr[2]));
+      offset = start + attr[3].length;
+      counts.set(fix.issueId, (counts.get(fix.issueId) || 0) + 1);
+      break;
     }
   }
   if (index !== nodes.length) throw new Error('XML 节点核对失败，未写入修复。');
-  replacements.sort((a, b) => b.start - a.start);
-  let last = Infinity;
-  for (const r of replacements) {
-    if (r.end > last) throw new Error('修复规则冲突，未写入文件。');
-    text = text.slice(0, r.start) + r.value + text.slice(r.end);
-    last = r.start;
-  }
-  return { text, counts };
+  output.push(text.slice(offset));
+  return { text: output.join(''), counts };
 }

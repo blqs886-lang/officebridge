@@ -22,13 +22,13 @@ npm run release:verify
 
 - `release/OfficeBridge.html`：单文件离线应用，已内嵌第三方许可。
 - `release/START-HERE.txt`：便携包使用说明，也单独列入校验清单。
-- `release/OfficeBridge-v0.1.0-portable.zip`：应用、合成样例、说明和可选 Windows 验证脚本。
-- `release/OfficeBridge-v0.1.0-source.zip`：完整可构建源码、测试和许可，不含依赖安装目录。
+- `release/OfficeBridge-v0.2.0-portable.zip`：应用、合成样例、说明和可选 Windows 验证脚本。
+- `release/OfficeBridge-v0.2.0-source.zip`：完整可构建源码、测试和许可，不含依赖安装目录。
 - `release/SHA256SUMS.txt` 与 `release/release-manifest.json`：产物校验信息及源码文件清单。
 
 打包程序按明确清单递归收集源码目录，不收集项目外文件，`work/`、`node_modules/` 和 `release/` 也不在源码清单中。**清单内目录的内容会全部收集，打包不依赖 `.gitignore` 过滤。** 不要把真实文稿、截图或密钥放进 `public/`、`docs/`、`scripts/`、`src/`、`tests/` 或 `.github/`；发布前检查 `release-manifest.json` 中的源码清单及内容。
 
-源码 ZIP 已包含锁文件、测试、合成样例及构建脚本。解压进入 `OfficeBridge-v0.1.0` 后，可按 README 执行 `npm ci`、`npm test`、`npm run build`、`npm run build:portable`。普通构建不需要 Python、Office 或 Playwright；Python 只用于重新生成已附带的合成样例，Playwright 只用于单独的浏览器回归。
+源码 ZIP 已包含锁文件、测试、合成样例及构建脚本。解压进入 `OfficeBridge-v0.2.0` 后，可按 README 执行 `npm ci`、`npm test`、`npm run build`、`npm run build:portable`。普通构建不需要 Python、Office 或 Playwright；Python 只用于重新生成已附带的合成样例，Playwright 只用于单独的浏览器回归。
 
 `release:local` 会重新生成同版本的本地发布文件；需要保留旧发布包时，先保存到其他位置。文档或源码修改后应重新打包并验证，不沿用旧 ZIP 的校验值。
 
@@ -47,7 +47,7 @@ gh auth status
 git status --short
 git add .github .gitattributes .gitignore AGENTS.md CHANGELOG.md CONTRIBUTING.md LICENSE README.md SECURITY.md THIRD_PARTY_NOTICES.md docs index.html package.json package-lock.json public scripts src tests vite.config.js
 git diff --cached --stat
-git commit -m "Release OfficeBridge 0.1.0"
+git commit -m "Release OfficeBridge 0.2.0"
 ```
 
 如果本地已有相同内容的提交，跳过提交步骤。若 Git 尚未设置作者，在这个仓库内设置自己的 Git 姓名和邮箱，不需要更改全局配置。
@@ -65,7 +65,7 @@ gh repo create officebridge --public --source=. --remote=origin --push
 在源码目录创建版本 Release。下列命令只上传明确列出的公开发布产物：
 
 ```sh
-gh release create v0.1.0 release/OfficeBridge.html release/START-HERE.txt release/OfficeBridge-v0.1.0-portable.zip release/OfficeBridge-v0.1.0-source.zip release/SHA256SUMS.txt release/release-manifest.json --title "OfficeBridge 0.1.0" --notes-file CHANGELOG.md
+gh release create v0.2.0 release/OfficeBridge.html release/START-HERE.txt release/OfficeBridge-v0.2.0-portable.zip release/OfficeBridge-v0.2.0-source.zip release/SHA256SUMS.txt release/release-manifest.json --title "OfficeBridge 0.2.0" --notes-file CHANGELOG.md
 ```
 
 如果这个版本已经存在，先查看现有 Release，不要使用覆盖参数来替换别人已下载的版本。发布后从 GitHub 下载离线包再试一次，并检查 README 中的下载入口指向真实地址。

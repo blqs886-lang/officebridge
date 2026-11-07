@@ -1,9 +1,10 @@
-import { NS, attribute } from './xml.js';
+import { NS, attribute, fontAttribute } from './xml.js';
 import { fontAdvice, isKnownFont, isProtectedFont } from './fonts.js';
 
 const DRAWING_NS = new Set([NS.a, 'http://purl.oclc.org/ooxml/drawingml/main']);
 const PRESENTATION_NS = new Set([NS.p, 'http://purl.oclc.org/ooxml/presentationml/main']);
 const RELATIONSHIP_NS = new Set([NS.rel, 'http://purl.oclc.org/ooxml/package/relationships']);
+const DOCUMENT_REL_NS = [NS.r, 'http://purl.oclc.org/ooxml/officeDocument/relationships'];
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'wma', 'aac', 'm4a', 'aiff', 'aif', 'ogg', 'oga', 'flac', 'mid', 'midi']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'mov', 'qt', 'avi', 'wmv', 'mpeg', 'mpg', 'webm', 'ogv', '3gp']);
 const ANIMATION_ELEMENTS = new Set(['anim', 'animClr', 'animEffect', 'animMotion', 'animRot', 'animScale', 'cmd', 'set']);
@@ -15,7 +16,7 @@ function descendants(node) {
 }
 
 function children(node) {
-  return Array.from(node.childNodes || []).filter(child => child.nodeType === 1);
+  return Array.from(node?.childNodes || []).filter(child => child.nodeType === 1);
 }
 
 function isDrawing(node, localName) {
@@ -30,7 +31,9 @@ function drawingChild(node, localName) {
   return children(node).find(child => isDrawing(child, localName));
 }
 
-function locationFor(part) {
+function locationFor(part, pages) {
+  const related = pages.get(part.endsWith('.rels') ? relationshipSource(part) : part);
+  if (related) return related;
   const slide = /^ppt\/slides\/slide(\d+)\.xml$/.exec(part);
   if (slide) return `幻灯片部件 ${slide[1]}（不一定是播放顺序）`;
   if (part.startsWith('ppt/slideMasters/')) return `幻灯片母版 · ${part.split('/').pop()}`;
@@ -43,6 +46,96 @@ function locationFor(part) {
 
 function relationshipSource(part) {
   return part.replace(/\/_rels\/([^/]+)\.rels$/, '/$1');
+}
+
+// Page labels follow the presentation's slide list, never slide filenames or
+// custom-show playback order. Only match declared, present package parts.
+function partForRelationship(source, rel, entries) {
+  if (attribute(rel, 'TargetMode', 'Internal') !== 'Internal') return null;
+  const target = attribute(rel, 'Target');
+  if (!target || /[\\?#\x00-\x1f]/.test(target) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(target)) return null;
+  const segments = target.startsWith('/') ? [] : source.split('/').slice(0, -1);
+  for (const item of target.split('/')) {
+    if (!item || item === '.') continue;
+    if (item !== '..') segments.push(item);
+    else if (!segments.length) return null;
+    else segments.pop();
+  }
+  const path = segments.join('/');
+  if (entries.has(path)) return path;
+  try {
+    const decoded = decodeURIComponent(path);
+    return entries.has(decoded) ? decoded : null;
+  } catch { return null; }
+}
+
+function slidePageLocations(xml, entries) {
+  const locations = new Map(), main = 'ppt/presentation.xml';
+  const root = xml.get(main)?.documentElement;
+  const list = children(root).find(node => isPresentation(node, 'sldIdLst'));
+  const relationships = children(xml.get('ppt/_rels/presentation.xml.rels')?.documentElement);
+  if (!list) return { locations, listedSlideCount: null };
+  const targets = new Map();
+  for (const rel of relationships) {
+    if (!RELATIONSHIP_NS.has(rel.namespaceURI) || rel.localName !== 'Relationship'
+      || !DOCUMENT_REL_NS.some(ns => attribute(rel, 'Type') === `${ns}/slide`)) continue;
+    const id = attribute(rel, 'Id');
+    targets.set(id, targets.has(id) ? null : partForRelationship(main, rel, entries));
+  }
+  const numbers = new Map();
+  const slideIds = children(list).filter(n => isPresentation(n, 'sldId'));
+  slideIds.forEach((slideId, i) => {
+    const id = DOCUMENT_REL_NS.map(ns => slideId.getAttributeNS(ns, 'id')).find(Boolean);
+    const part = targets.get(id);
+    if (!part || !xml.has(part) || !isPresentation(xml.get(part).documentElement, 'sld')) return;
+    numbers.set(part, numbers.has(part) ? null : i + 1);
+  });
+  const related = new Map();
+  for (const [part, number] of numbers) {
+    if (!number) continue;
+    const hidden = ['0', 'false'].includes(attribute(xml.get(part).documentElement, 'show'));
+    locations.set(part, `第 ${number} 张幻灯片（文稿顺序${hidden ? '，已隐藏' : ''}）`);
+    const relationshipPart = part.replace(/([^/]+)$/, '_rels/$1.rels');
+    for (const rel of children(xml.get(relationshipPart)?.documentElement)) {
+      if (!RELATIONSHIP_NS.has(rel.namespaceURI) || rel.localName !== 'Relationship') continue;
+      const type = attribute(rel, 'Type');
+      if (!DOCUMENT_REL_NS.some(ns => type === `${ns}/chart` || type === `${ns}/notesSlide`)) continue;
+      const target = partForRelationship(part, rel, entries);
+      if (!target) continue;
+      const pages = related.get(target) || new Set();
+      pages.add(number); related.set(target, pages);
+    }
+  }
+  for (const [part, refs] of related) {
+    const pages = [...refs], sample = pages.slice(0, 4).join('、');
+    locations.set(part, `${part.split('/').pop()} · 文稿第 ${sample} 张幻灯片${pages.length > 4 ? `等（共 ${pages.length} 张）` : ''}`);
+  }
+  return { locations, listedSlideCount: numbers.size === slideIds.length ? slideIds.length : null };
+}
+
+// A custom font can carry a private-use logo or bullet even if its name and
+// charset give no hint. Protect only families evidenced by the run/paragraph
+// properties, or by the bullet's sibling font, not every font on that slide.
+function privateUseFonts(nodes) {
+  const families = new Set(), defaults = new WeakMap();
+  const remember = font => {
+    if (font?.hasAttribute('typeface')) families.add(`${font.namespaceURI}\u0000${attribute(font, 'typeface')}`);
+  };
+  for (const node of nodes) {
+    if (isDrawing(node, 'buChar') && PRIVATE_USE.test(attribute(node, 'char'))) {
+      remember(drawingChild(node.parentNode, 'buFont'));
+      continue;
+    }
+    if (!isDrawing(node, 't') || !PRIVATE_USE.test(node.textContent || '')) continue;
+    const run = node.parentNode, paragraph = run?.parentNode;
+    if ((!isDrawing(run, 'r') && !isDrawing(run, 'fld')) || !paragraph || !isDrawing(paragraph, 'p')) continue;
+    if (!defaults.has(paragraph)) defaults.set(paragraph, drawingChild(drawingChild(paragraph, 'pPr'), 'defRPr'));
+    const properties = drawingChild(run, 'rPr');
+    for (const role of ['latin', 'ea', 'cs', 'sym']) {
+      remember(drawingChild(properties, role) ?? drawingChild(defaults.get(paragraph), role));
+    }
+  }
+  return families;
 }
 
 function extension(part) {
@@ -98,18 +191,24 @@ function hasAncestor(node, predicate) {
 function explicitTextHeight(textBody) {
   let height = 0;
   for (const paragraph of children(textBody).filter(node => isDrawing(node, 'p'))) {
-    const runs = children(paragraph).filter(node => isDrawing(node, 'r') || isDrawing(node, 'fld'));
-    if (!runs.length) continue;
     const paragraphProperties = drawingChild(paragraph, 'pPr');
     const defaultRun = paragraphProperties && drawingChild(paragraphProperties, 'defRPr');
     const defaultSize = numericAttribute(defaultRun, 'sz');
-    const sizes = runs.map(run => numericAttribute(drawingChild(run, 'rPr'), 'sz') ?? defaultSize);
-    if (sizes.some(size => size === null || size <= 0)) return null;
-    const hardLines = 1 + children(paragraph).filter(node => isDrawing(node, 'br')).length;
     // Explicit paragraph line spacing can make lines closer than the font size.
     // Skip it instead of claiming that tightly spaced text overflows.
     if (paragraphProperties && drawingChild(paragraphProperties, 'lnSpc')) return null;
-    height += Math.max(...sizes) * 127 * hardLines;
+    // A title above smaller body lines must not lend its size to every line.
+    // Empty hard lines have no measured glyphs; leave their contribution out.
+    let lineSize = 0;
+    for (const child of children(paragraph)) {
+      if (isDrawing(child, 'br')) { height += lineSize * 127; lineSize = 0; continue; }
+      if (!isDrawing(child, 'r') && !isDrawing(child, 'fld')) continue;
+      if (!drawingChild(child, 't')?.textContent) continue;
+      const size = numericAttribute(drawingChild(child, 'rPr'), 'sz') ?? defaultSize;
+      if (size === null || size <= 0) return null;
+      lineSize = Math.max(lineSize, size);
+    }
+    height += lineSize * 127;
   }
   return height || null;
 }
@@ -174,13 +273,17 @@ export function scanPptx(context) {
   const issues = [];
   const counters = new Map();
   const fontInventory = new Map();
+  const { locations, listedSlideCount } = slidePageLocations(xml, entries);
   const inventory = {
-    slideCount: 0, fonts: [], externalLinks: [], media: [], embeddedObjects: [],
+    slideCount: 0, slidePartCount: 0, fonts: [], externalLinks: [], media: [], embeddedObjects: [],
     embeddedFiles: [], embeddedFontFamilies: [], animations: [], chartCount: 0,
     heuristicChecks: { textBoxesFound: 0, coordinateChecks: 0, explicitLineHeightChecks: 0, skippedTextBoxes: 0 },
     notes: [
       '字体清单包含主题、母版、版式和图表中的声明；声明存在不代表每个字体都用于可见文字。',
-      '未读取目标电脑的字体、字形覆盖或媒体解码器；没有进行 Windows Office 渲染或播放验证。',
+      options.targetFonts?.length
+        ? '按导入的字体名称名单对照，未测试目标电脑的字形覆盖、媒体解码或实际播放效果。'
+        : '未读取目标电脑的字体、字形覆盖或媒体解码器；没有进行 Windows Office 渲染或播放验证。',
+      '私用区字符保护使用直接声明的文字、段落和项目符号字体；从母版、版式或主题继承的实际字体仍需核对。',
       '文本边界检查仅覆盖有显式坐标的未分组、未旋转文本框；未完整解析继承、自动换行和字形度量。',
     ],
   };
@@ -189,7 +292,7 @@ export function scanPptx(context) {
     const index = (counters.get(key) || 0) + 1;
     counters.set(key, index);
     issues.push({
-      id: `${key}:${index}`, code, severity: 'info', location: locationFor(part), part,
+      id: `${key}:${index}`, code, severity: 'info', location: locationFor(part, locations), part,
       fixable: false, defaultSelected: false, ...details,
     });
   }
@@ -213,6 +316,7 @@ export function scanPptx(context) {
     }
   }
 
+  const embedded = new Set(inventory.embeddedFontFamilies.map(name => name.trim().toLowerCase()));
   const parts = [...xml.entries()].filter(([part]) => part.startsWith('ppt/')).sort(([a], [b]) => a.localeCompare(b, 'en'));
   for (const [part, doc] of parts) {
     const nodes = descendants(doc);
@@ -238,8 +342,8 @@ export function scanPptx(context) {
       continue;
     }
 
-    const perPartFonts = new Map();
-    for (const node of nodes.filter(node => isDrawing(node) && node.hasAttribute('typeface'))) {
+    const perPartFonts = new Map(), glyphFonts = privateUseFonts(nodes);
+    for (const node of nodes.filter(node => isDrawing(node) && fontAttribute(node) === 'typeface' && node.hasAttribute('typeface'))) {
       // Preserve the exact attribute for fix.from: the repair engine makes an
       // exact, minimally invasive match rather than normalizing source XML.
       const name = attribute(node, 'typeface');
@@ -258,7 +362,10 @@ export function scanPptx(context) {
     const unverifiedSupplementalFonts = [];
     for (const { name, namespace, count, symbol, supplementalOnly } of perPartFonts.values()) {
       const themeReference = /^\+(?:mj|mn)-(?:lt|ea|cs)$/.test(name.trim());
-      const isSymbol = symbol || isProtectedFont(name);
+      const isPrivateGlyphFont = glyphFonts.has(`${namespace}\u0000${name}`);
+      const isSymbol = symbol || isPrivateGlyphFont || isProtectedFont(name);
+      const embeddedNote = embedded.has(name.trim().toLowerCase())
+        ? ' 文稿也声明嵌入了此字体，但可能只有已使用字符的子集；请在目标软件中核对显示和编辑。' : '';
       const advice = themeReference || isSymbol ? null : fontAdvice(name, options);
       const status = themeReference ? 'theme-reference' : isSymbol ? 'special-glyph-font' : advice ? 'suggested-replacement' : isKnownFont(name, options) ? 'common-target-font' : 'unverified';
       const known = fontInventory.get(name) || { name, parts: [], status, declarations: 0 };
@@ -268,15 +375,17 @@ export function scanPptx(context) {
       if (themeReference) continue;
       if (isSymbol) {
         addIssue('PPTX_SYMBOL_FONT', part, {
-          title: '符号、公式或图标字体需要保留字形含义',
-          description: '此字体可能用专用字形表达符号、公式、表情或图标。换成普通正文字体可能改变含义，因此不会自动提供字体替换。',
+          title: isPrivateGlyphFont ? `保留与私用区字符关联的字体：${name}` : '符号、公式或图标字体需要保留字形含义',
+          description: isPrivateGlyphFont
+            ? '此字体出现在私用区字符的文字或项目符号属性中。其他字体可能把同一字符显示为不同的字或图标。替换按部件和字体名称进行，因此这里保留该部件中的同名字体，即使设置了自定义映射。'
+            : '此字体可能用专用字形表达符号、公式、表情或图标。换成普通正文字体可能改变含义，因此不会自动提供字体替换。',
           evidence: `${name}；${count} 处字体声明`,
           recommendation: '确认目标电脑具有该字体或可用的嵌入字体，并逐项核对符号。',
         });
       } else if (advice && advice.to && advice.to !== name) {
         addIssue('PPTX_FONT_REPLACEMENT', part, {
           severity: 'warning', title: `字体可能需要替换：${name}`,
-          description: `${advice.reason} 替换可能改变字宽、换行和版面；这里只提供需要主动选择的候选方案。`,
+          description: `${advice.reason} 替换可能改变字宽、换行和版面；这里只提供需要主动选择的候选方案。${embeddedNote}`,
           evidence: `${name}；${count} 处字体声明`,
           recommendation: `可考虑替换为 ${advice.to}，随后在目标软件中检查文字、符号和换行。`,
           fixable: true, defaultSelected: false,
@@ -287,7 +396,9 @@ export function scanPptx(context) {
       } else if (!isKnownFont(name, options)) {
         addIssue('PPTX_FONT_UNVERIFIED', part, {
           title: `目标字体尚未确认：${name}`,
-          description: '此字体不在当前目标环境的常见字体清单内。工具无法得知收件人的实际安装情况，也不将未知字体判定为不兼容。',
+          description: (options.targetFonts?.length
+            ? '导入的目标电脑字体名单未列出此名称。其他语言的名称、Office 云字体和文稿嵌入字体可能另外可用；请核对显示。'
+            : '此字体不在当前目标环境的常见字体清单内。工具无法得知收件人的实际安装情况，也不将未知字体判定为不兼容。') + embeddedNote,
           evidence: `${name}；${count} 处字体声明`,
           recommendation: '确认收件人具有该字体；如需替换，请先选择能覆盖原文字和符号的字体并检查版面。',
         });
@@ -369,7 +480,7 @@ export function scanPptx(context) {
       });
     }
     if (/^ppt\/slides\/[^/]+\.xml$/.test(part) && isPresentation(doc.documentElement, 'sld')) {
-      inventory.slideCount += 1;
+      inventory.slidePartCount += 1;
       inspectTextBounds(doc, part, slideSize, addIssue, inventory.heuristicChecks);
     }
     if (/^ppt\/charts\/[^/]+\.xml$/.test(part) && doc.documentElement.localName === 'chartSpace') inventory.chartCount += 1;
@@ -399,6 +510,7 @@ export function scanPptx(context) {
       });
     }
   }
+  inventory.slideCount = listedSlideCount ?? inventory.slidePartCount;
   inventory.fonts = [...fontInventory.values()].sort((a, b) => a.name.localeCompare(b.name, 'en'));
   return { issues, inventory };
 }

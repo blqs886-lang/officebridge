@@ -4,7 +4,9 @@ import { scanPptx } from './pptx.js';
 import { scanXlsx } from './xlsx.js';
 import { normalizeFontOptions } from './fonts.js';
 
-export const VERSION = '0.1.0';
+import { compareFontList } from './target-fonts.js';
+
+export const VERSION = '0.2.0';
 const mainTypes = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml',
@@ -174,12 +176,13 @@ async function buildReport(ctx) {
   const issues = [...ctx.issues, ...scanned.issues];
   // Deduplicate package findings produced by multiple references.
   const unique = [...new Map(issues.map(i => [i.id, i])).values()];
+  const comparison = ctx.options.targetFonts ? compareFontList(ctx.options.targetFonts, scanned.inventory.fonts) : null;
   return {
     schemaVersion: 1, toolVersion: VERSION, fileName: ctx.fileName, format: ctx.format,
     sha256: await digest(ctx.bytes), fileSize: ctx.bytes.length,
     analysisOptions: { fontProfile: ctx.options.fontProfile, fontMappings: { ...ctx.options.fontMappings } },
     issues: unique,
-    inventory: { ...scanned.inventory, packageParts: ctx.entries.size, expandedBytes: ctx.expandedBytes,
+    inventory: { ...scanned.inventory, ...(comparison && { targetFontComparison: comparison }), packageParts: ctx.entries.size, expandedBytes: ctx.expandedBytes,
       externalRelationshipCount: ctx.externalRelationshipCount },
     repairBlocked: ctx.issues.some(i => i.severity === 'error'),
     validation: { packageChecked: true, windowsOfficeTested: false,

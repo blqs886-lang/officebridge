@@ -330,3 +330,152 @@ test('real-package hyperlink diagnostics survive font repair without changing li
   assert.ok(issue(repaired.report, 'EXTERNAL_RESOURCE_RELATIONSHIP'));
   assert.ok(issue(repaired.report, 'EXTERNAL_WEB_HYPERLINK'));
 });
+
+test('nested calls are detected without treating structured headers, quoted sheets or literal text as functions', () => {
+  const cases = [
+    ['A1', 'IFERROR(_xlfn.XLOOKUP(1,B:B,C:C),0)'],
+    ['B1', 'IF(ISERROR(_xll.Custom(x)),0,WEBSERVICE(A1))'],
+    ['C1', 'SUM(Table1[[#Data],[XLOOKUP(1)]])+SUM(Table1[WEBSERVICE(A1)])'],
+    ['D1', '"He said ""XLOOKUP(1)"" and [2]Sheet!A1"&SUM(1,2)'],
+    ['E1', "'Renée''s XLOOKUP(1)'!A1"],
+    ['F1', 'SUM(例XLOOKUP(1),1)'],
+    ['G1', "SUM('[2]Name''s report'!A1)+[3]!MyExternalName"],
+  ];
+  const report = inspect({ 'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1">' + cases.map(([r, f]) => formula(r, escapeAttribute(f))).join('') + '</row></sheetData>') });
+  assert.match(issue(report, 'FORMULA_VERSION_REQUIREMENT').evidence, /^1 个单元格：A1。/);
+  const dependencies = issue(report, 'FORMULA_ENVIRONMENT_DEPENDENCY').evidence;
+  assert.match(dependencies, /^1 个单元格：B1。/);
+  assert.match(dependencies, /_XLL.CUSTOM/);
+  assert.match(dependencies, /WEBSERVICE/);
+  assert.match(issue(report, 'EXTERNAL_WORKBOOK_FORMULA').evidence, /^1 个单元格：G1。/);
+});
+
+test('identifies literal file HYPERLINK formulas without inferring a target from a label, cell or concatenation', () => {
+  const sources = [
+    'IFERROR(HYPERLINK("/Users/example/审计记录.pdf","附件"),"无法访问")',
+    'HYPERLINK("../attachments/report.pdf")', 'HYPERLINK("file:///Volumes/Office/report.pdf",A1)',
+    'HYPERLINK("\\\\fileserver\\team\\report.pdf")', 'HYPERLINK("attachments/report.pdf")',
+    'HYPERLINK("D:\\reports\\report.xlsx")', 'HYPERLINK("http://localhost:8080/figure")',
+    'HYPERLINK("说明.pdf")', 'HYPERLINK("[C:\\reports\\report.xlsx]Totals")',
+    'HYPERLINK("#预算!B3","file:///Users/ignored.pdf")', 'HYPERLINK("[Book1.xlsx]Sheet2!A1")',
+    'HYPERLINK("https://example.invalid/report.pdf","../../ignored.pdf")', 'HYPERLINK("mailto:a@example.invalid")',
+    'HYPERLINK(A1,"/Users/example/friendly-name.txt")', 'HYPERLINK("notes/"&A1)',
+    'IF(A1,"HYPERLINK(""/Users/example/file"")","")', 'Table1[HYPERLINK(A1)]', 'HYPERLINK("http://",A1)',
+  ];
+  const cells = sources.map((f, i) => '<row r="' + (i + 1) + '">' + formula('A' + (i + 1), escapeAttribute(f)) + '</row>').join('');
+  const report = inspect({ 'xl/worksheets/sheet1.xml': sheet('<sheetData>' + cells + '</sheetData>') });
+  const found = issue(report, 'FORMULA_FILE_HYPERLINK');
+  assert.match(found.evidence, /^9 个单元格：A1、A2、A3、A4、A5、A6、A7、A8、A9。$/);
+  assert.equal(found.severity, 'warning');
+  assert.equal(found.fixable, false);
+});
+
+test('table and named formulas report literal file links even when the package contains no hyperlink relationships', () => {
+  const report = inspect({
+    'xl/workbook.xml': workbook('<definedNames><definedName name="OpenNote">HYPERLINK("note.pdf")</definedName></definedNames>'),
+    'xl/tables/table1.xml': '<table xmlns="' + S + '"><tableColumns><tableColumn id="1" name="报告"><calculatedColumnFormula>IFERROR(HYPERLINK("../report.pdf"),"")</calculatedColumnFormula></tableColumn></tableColumns></table>',
+  });
+  const items = report.issues.filter(item => item.code === 'OTHER_FORMULA_FILE_HYPERLINK');
+  assert.equal(items.length, 2);
+  assert.ok(items.some(item => item.evidence.includes('OpenNote')));
+  assert.ok(items.some(item => item.evidence.includes('报告')));
+  assert.ok(items.every(item => !item.fixable));
+});
+
+test('distinguishes missing caches, stored formula errors, valid blank strings and numeric formula results', () => {
+  const report = inspect({ 'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1">' +
+    '<c r="A1"><f>SUM(M1:M2)</f></c><c r="B1" t="n"><f t="shared" si="0"/><v/></c>' +
+    '<c r="C1" t="e"><f>NA()</f><v>#N/A</v></c><c r="D1" t="e"><f>UnloadedName</f><v>#NAME?</v></c>' +
+    '<c r="E1" t="str"><f>""</f><v/></c><c r="F1"><f>1-1</f><v>0</v></c>' +
+    '<c r="G1"><f>1/3</f><v>0.33333333333333331</v></c><c r="H1"><f>1E18</f><v>1000000000000000000</v></c>' +
+    inline('I1', '#REF!') + '<c r="J1" t="e"><v>#REF!</v></c><c r="K1"><v>000</v></c>' +
+    '<c r="L1"><v>0E+32</v></c></row></sheetData>') });
+  assert.match(issue(report, 'FORMULA_CACHE_MISSING').evidence, /^2 个单元格：A1、B1。$/);
+  assert.equal(issue(report, 'FORMULA_CACHE_MISSING').severity, 'info');
+  assert.match(issue(report, 'FORMULA_CACHE_ERROR').evidence, /^2 个单元格：C1、D1。保存的错误值：#N\/A；#NAME\?。$/);
+  assert.ok(!issue(report, 'NUMERIC_PRECISION_RISK'));
+  assert.match(issue(report, 'NUMERIC_LEADING_ZEROS').evidence, /^1 个单元格：K1。/);
+  assert.ok(report.issues.every(item => !item.fixable));
+});
+
+test('only warns of display-added zeros when the applicable numeric format actually pads a stored value', () => {
+  const report = inspect({
+    'xl/styles.xml': styles('<numFmts><numFmt numFmtId="164" formatCode="0000;-0000;0"/><numFmt numFmtId="165" formatCode="[&lt;10]0000;00"/></numFmts><cellXfs><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1">' +
+      '<c r="A1"><v>12</v></c><c r="B1"><v>-12</v></c><c r="C1"><v>999.6</v></c>' +
+      '<c r="D1"><v>12345</v></c><c r="E1"/><c r="F1"><v>0</v></c>' +
+      '<c r="G1" s="1"><v>9</v></c>' + inline('H1', '123') + '</row></sheetData>'),
+  });
+  assert.match(issue(report, 'ZERO_PADDED_DISPLAY').evidence, /^2 个单元格：A1、B1。/);
+});
+
+test('edit restriction findings require explicit active flags and omit password hashes', () => {
+  const report = inspect({
+    'xl/workbook.xml': workbook('<workbookProtection lockStructure="true" workbookPassword="A9CE"/>'),
+    'xl/worksheets/sheet1.xml': sheet('<sheetData/><sheetProtection sheet="1" password="A9CE"/>'),
+    'xl/worksheets/sheet2.xml': sheet('<sheetData/><sheetProtection sheet="0" formatCells="1"/>'),
+    'xl/worksheets/sheet3.xml': sheet('<sheetData/><customSheetViews><customSheetView><sheetProtection sheet="1"/></customSheetView></customSheetViews>'),
+  });
+  assert.equal(report.issues.filter(item => item.code === 'WORKSHEET_EDIT_PROTECTED').length, 1);
+  assert.equal(issue(report, 'WORKSHEET_EDIT_PROTECTED').part, 'xl/worksheets/sheet1.xml');
+  assert.ok(issue(report, 'WORKBOOK_STRUCTURE_PROTECTED'));
+  assert.ok(report.issues.every(item => item.severity === 'info' && !item.fixable));
+  assert.ok(!JSON.stringify(report).includes('A9CE'));
+  assert.ok(!issue(inspect({ 'xl/workbook.xml': workbook('<workbookProtection workbookPassword="A9CE"/>') }), 'WORKBOOK_STRUCTURE_PROTECTED'));
+});
+
+test('font inventory and fixes use the same contexts; target list evidence differs from generic unverified status', () => {
+  const parts = {
+    'xl/styles.xml': styles('<fonts><font><name val="Missing Example Font"/></font></fonts><extLst><x:font xmlns:x="urn:vendor"><name val="Helvetica"/></x:font><rFont val="Helvetica"/></extLst>'),
+  };
+  const generic = inspect(parts), specific = inspect(parts, { targetFonts: ['Arial'] });
+  assert.deepEqual(specific.inventory.fonts.map(item => item.name), ['Missing Example Font']);
+  assert.match(issue(specific, 'FONT_UNVERIFIED').description, /导入的目标电脑字体名单未列出/);
+  assert.ok(!issue(generic, 'FONT_UNVERIFIED').description.includes('导入'));
+});
+
+test('font repair preserves protected XLSX structures, 1904 dates, formulas, cached errors, literal links and exact identifiers', async () => {
+  const entries = readArchive(createDemo('xlsx')).entries;
+  const encoder = new TextEncoder(), decoder = new TextDecoder();
+  const wb = 'xl/workbook.xml', sh = 'xl/worksheets/sheet1.xml', st = 'xl/styles.xml';
+  entries.set(wb, encoder.encode(decoder.decode(entries.get(wb)).replace('<workbookPr/>', '<workbookPr date1904="1"/>').replace('<workbookProtection/>', '<workbookProtection lockStructure="1"/>')));
+  entries.set(sh, encoder.encode(sheet('<sheetData><row r="1">' +
+    '<c r="A1" s="2"><f>IFERROR(_xlfn.XLOOKUP(1,B:B,C:C),0)</f></c>' +
+    '<c r="B1" t="e"><f>NA()</f><v>#N/A</v></c>' +
+    '<c r="C1" t="str"><f>HYPERLINK("../附件.pdf","附件")</f><v>附件</v></c>' +
+    '<c r="D1" t="d"><v>2024-02-29T08:30:00Z</v></c>' + inline('E1', '00012345678901234567') +
+    '</row></sheetData><sheetProtection sheet="1"/>')));
+  const bytes = writeArchive(entries), original = bytes.slice();
+  const before = await analyzeOffice(bytes, 'restricted-dates.xlsx');
+  const fix = before.issues.find(item => item.part === st && item.fix?.from === 'PingFang SC');
+  assert.ok(fix);
+  const repaired = await repairOffice(bytes, 'restricted-dates.xlsx', { selectedIssueIds: [fix.id] });
+  const after = readArchive(repaired.bytes).entries;
+  assert.deepEqual(bytes, original);
+  assert.deepEqual(after.get(sh), entries.get(sh));
+  assert.deepEqual(after.get(wb), entries.get(wb));
+  assert.equal(decoder.decode(after.get(st)), decoder.decode(entries.get(st)).replaceAll('name val="PingFang SC"', 'name val="Microsoft YaHei"'));
+  assert.deepEqual(repaired.changes.map(change => change.part), [st]);
+  for (const code of ['WORKSHEET_EDIT_PROTECTED', 'WORKBOOK_STRUCTURE_PROTECTED', 'DATE_SYSTEM_1904', 'FORMULA_VERSION_REQUIREMENT', 'FORMULA_CACHE_MISSING', 'FORMULA_CACHE_ERROR', 'FORMULA_FILE_HYPERLINK', 'TEXT_IDENTIFIER_PRESERVED']) {
+    assert.ok(issue(before, code), code);
+    assert.deepEqual(issue(repaired.report, code), issue(before, code), code);
+  }
+});
+
+test('guards private-use glyphs in cell, row, column and rich-text fonts, including OOXML escapes and numeric symbol charset', () => {
+  const families = ['Arial', 'Cell Face', 'Row Face', 'Column Face', 'Ordinary Face'];
+  const fonts = families.map(n => '<font><name val="' + n + '"/></font>').join('') + '<font><name val="Glyph Face"/><charset val="+02"/></font>';
+  const xfs = families.map((_, i) => '<xf fontId="' + i + '"/>').join('');
+  const report = inspect({
+    'xl/styles.xml': styles('<fonts>' + fonts + '</fonts><cellXfs>' + xfs + '</cellXfs>'),
+    'xl/sharedStrings.xml': '<sst xmlns="' + S + '"><si><r><rPr><rFont val="Inline Logo"/></rPr><t>_xE001_</t></r></si><si><r><rPr><rFont val="Ordinary Rich"/></rPr><t>_x005F_xE001_</t></r></si></sst>',
+    'xl/worksheets/sheet1.xml': sheet('<cols><col min="3" max="3" style="3" width="10"/></cols><sheetData>' +
+      '<row r="1">' + inline('A1', '\uE000', 's="1"') + inline('C1', '\u{F0000}') + inline('D1', 'ordinary', 's="4"') + '</row>' +
+      '<row r="2" customFormat="1" s="2"><c r="A2" t="s"><v>0</v></c><c r="B2" t="s"><v>1</v></c></row></sheetData>'),
+  }, { fontMappings: Object.fromEntries([...families.slice(1), 'Inline Logo', 'Ordinary Rich', 'Glyph Face'].map(n => [n, 'Arial'])) });
+  assert.deepEqual(report.issues.filter(i => i.fixable).map(i => i.fix.from).sort(), ['Ordinary Face', 'Ordinary Rich']);
+  assert.match(issue(report, 'PRIVATE_USE_TEXT').evidence, /^3 个单元格：A1、C1、A2。/);
+  for (const family of ['Cell Face', 'Row Face', 'Column Face', 'Inline Logo', 'Glyph Face']) {
+    assert.ok(report.issues.some(i => i.code === 'SYMBOL_FONT_REVIEW' && i.title.includes(family) && !i.fixable), family);
+  }
+});

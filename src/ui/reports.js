@@ -52,6 +52,8 @@ export function buildHtmlReport(record) {
   const changes = (record.repaired?.changes || []).map((change) => `<tr><td>${esc(change.part)}</td><td>${esc(change.before)} → ${esc(change.after)}</td><td>${esc(change.count)}</td></tr>`).join('');
   const repairedIssues = record.repaired?.report?.issues || [];
   const mappingRows = Object.entries(payload.analysisOptions.fontMappings).map(([from, to]) => `<tr><td>${esc(from)}</td><td>${esc(to)}</td></tr>`).join('');
+  const comparison = report.inventory?.targetFontComparison;
+  const comparisonHtml = comparison ? `<h2>目标 Windows 字体名单核对</h2><p>已核对 ${comparison.nameCount} 个目标字体名称，含文档的主题备用声明。以下仅列出文档声明的字体。</p><p>名单有：${esc(comparison.listed.join('、') || '无')}</p><p>名单未列出：${esc(comparison.unlisted.join('、') || '无')}</p><p>名称匹配用于筛选替换建议。别名、云字体、嵌入字体、字形覆盖与实际换行需在目标电脑确认。</p>` : '';
   const repairedRows = repairedIssues.map((issue) => `<tr><td>${esc(severityLabels[issue.severity] || '提示')}</td><td><strong>${esc(issue.title)}</strong><p>${esc(issue.description)}</p>${issue.recommendation ? `<p>建议：${esc(issue.recommendation)}</p>` : ''}</td><td>${esc(issue.location || issue.part || '文件整体')}</td></tr>`).join('');
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'"><title>${esc(report.fileName)} — OfficeBridge 检查报告</title><style>
@@ -59,7 +61,7 @@ export function buildHtmlReport(record) {
 </style></head><body><main><header><div class="brand">OfficeBridge · 兼容检查报告</div><h1>${esc(report.fileName)}</h1><p class="muted">${esc(String(report.format || '').toUpperCase())} · ${esc(formatBytes(report.fileSize))} · ${esc(new Date(payload.generatedAt).toLocaleString('zh-CN'))}</p></header>
 <div class="notice"><strong>尚未在 Windows Office 中实际验证</strong><p>本报告基于文档结构检查。没有发现风险，不等于已保证排版一致。请用目标电脑打开副本，检查版式与功能。</p></div>
 <h2>本次检查参数</h2><p>目标环境：Windows Office。${mappingRows ? '以下为用户为此文件指定的字体规则，仅生成建议；只有修改记录中列出的替换已应用到副本。目标电脑仍须安装相应字体，且替换可能影响排版。' : '未设置自定义字体规则，使用内置字体建议。'}</p>${mappingRows ? `<table><thead><tr><th>原字体</th><th>用户指定的目标字体</th></tr></thead><tbody>${mappingRows}</tbody></table>` : ''}
-<h2>原文件检查结果</h2><p>${report.issues?.length || 0} 项发现。${report.repairBlocked ? '文件禁止自动修复；请在原始应用中处理后重新导出。' : '仅明确选择的字体替换会应用到副本，原件不变。'}</p>
+${comparisonHtml}<h2>原文件检查结果</h2><p>${report.issues?.length || 0} 项发现。${report.repairBlocked ? '文件禁止自动修复；请在原始应用中处理后重新导出。' : '仅明确选择的字体替换会应用到副本，原件不变。'}</p>
 ${rows ? `<table><thead><tr><th>级别</th><th>发现与建议</th><th>位置</th></tr></thead><tbody>${rows}</tbody></table>` : '<p>没有发现当前规则覆盖的风险。</p>'}
 ${record.repaired ? `<h2>修复副本</h2><p>文件名：${esc(record.repaired.fileName)}</p><p>修复后复查仍有 ${repairedIssues.length} 项发现；这些发现不代表全部是可自动修复的问题。</p>${changes ? `<table><thead><tr><th>修改部件</th><th>修改内容</th><th>次数</th></tr></thead><tbody>${changes}</tbody></table>` : '<p>没有记录到文件修改。</p>'}<h2>修复后的复查发现</h2>${repairedRows ? `<table><thead><tr><th>级别</th><th>发现与建议</th><th>位置</th></tr></thead><tbody>${repairedRows}</tbody></table>` : '<p>没有发现当前规则覆盖的风险。仍需在目标 Windows 软件中复核。</p>'}` : ''}
 <h2>交接前复核</h2><ol><li>在目标 Windows 电脑上用实际使用的 Office 或 WPS 版本打开。</li><li>核对字体、文字换行、图片位置、图表与打印版式。</li><li>演示文稿试播动画、音视频；表格检查公式结果、外部链接和日期。</li><li>保存、关闭并重新打开副本，确认仍然可编辑。</li></ol>

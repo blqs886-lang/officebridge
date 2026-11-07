@@ -8,7 +8,7 @@ OfficeBridge 帮你在把 PPTX 演示文稿、XLSX 表格交给另一台电脑�
 
 ## 1. 打开应用
 
-拿到 `OfficeBridge.html` 后，可直接用浏览器打开。拿到 `OfficeBridge-v0.1.0-portable.zip` 后，先解压整个压缩包，再打开里面的 `OfficeBridge.html`。不要在压缩包预览窗口里操作。
+拿到 `OfficeBridge.html` 后，可直接用浏览器打开。拿到 `OfficeBridge-v0.2.0-portable.zip` 后，先解压整个压缩包，再打开里面的 `OfficeBridge.html`。不要在压缩包预览窗口里操作。
 
 | 电脑 | 打开方法 |
 | --- | --- |
@@ -18,9 +18,9 @@ OfficeBridge 帮你在把 PPTX 演示文稿、XLSX 表格交给另一台电脑�
 
 如果双击后看到的是代码或文本，通常是选错了打开应用：改用浏览器打开这个 HTML 文件。若浏览器显示下载页面而非工作台，先确认打开的是解压出来的文件。
 
-当前完整的离线浏览器流程已在 **Mac Chrome 155** 和 **Windows 11 Edge 156** 中验证。**Windows 桌面 Office 尚未实测**；浏览器通过不代表所有文件在 Office 中的版面或功能都已通过验证。具体记录见 [测试范围](TESTING.md)。
+离线工作台已在 **Mac Chrome** 和 **Windows 11 Edge** 中实际验证。**Windows 桌面 Office 尚未实测**；浏览器通过不代表所有文件在 Office 中的版面或功能都已通过验证。具体记录见 [测试范围](TESTING.md)。
 
-`OfficeBridge-v0.1.0-source.zip` 是开发源码包，不能代替便携应用；普通使用请选择便携包或单个 HTML 文件。
+`OfficeBridge-v0.2.0-source.zip` 是开发源码包，不能代替便携应用；普通使用请选择便携包或单个 HTML 文件。
 
 ## 2. 先用合成样例完成一次下载
 
@@ -36,12 +36,12 @@ OfficeBridge 帮你在把 PPTX 演示文稿、XLSX 表格交给另一台电脑�
 
 演示文稿的操作相同：点击 **“演示文稿”**，检查 `跨系统交接示例.pptx`，选择后生成并下载 `跨系统交接示例.windows.pptx`。
 
-当前 0.1.0 合成样例的参考结果如下，已用当前引擎核对。规则或样例更新后数字可能变化，它们不是兼容性评分。
+当前 0.2.0 合成样例的参考结果如下，已用当前引擎核对。规则或样例更新后数字可能变化，它们不是兼容性评分。
 
 | 样例 | 内容数量 | 可选字体建议 | 全部采用后仍会出现的提醒 |
 | --- | --- | --- | --- |
 | 演示文稿 | 2 张幻灯片 | 3 项，涉及 `PingFang SC` 和 `Helvetica Neue`；同一字体可能出现在不同部件 | 2 项主题备用字体提醒 |
-| 电子表格 | 2 个工作表：“预算示例”“编号与说明” | 2 项，涉及上述两种字体 | 3 项：主题备用字体、打印分页、文本编号保留 |
+| 电子表格 | 2 个工作表：“预算示例”“编号与说明” | 2 项，涉及上述两种字体 | 4 项：主题备用字体、公式缓存、打印分页、文本编号保留 |
 
 **修复后仍有提醒不等于失败。** 例如打印分页需要在目标软件里检查，工具不会为了减少提醒数量而删除相关内容。样例生成成功也不表示目标电脑已安装建议字体。
 
@@ -60,11 +60,27 @@ OfficeBridge 帮你在把 PPTX 演示文稿、XLSX 表格交给另一台电脑�
 
 ## 4. 字体建议不合适时
 
-建议的目标字体必须在接收方电脑上可用。OfficeBridge 不读取对方的字体清单、不下载字体，也不为你安装字体；下拉候选名称不能证明对方已安装。可以先让接收方在其 Office 字体列表中确认名称，再决定是否替换。
+没有目标名单也可以检查文件。有接收方的 Windows 电脑时，可以按这台电脑的字体筛选建议。
+
+1. 在目标 Windows 的 Edge 或 Chrome 打开同一份 `OfficeBridge.html`，点“电子表格”样例。展开 **“字体设置：目标名单与自定义替换”**。
+2. 点 **“读取这台 Windows 的字体”**。浏览器询问权限时，由电脑使用者决定是否允许。成功后页面会显示读到的名称数量，名单已应用到当前文件。
+3. 要回 Mac 做检查，点 **“保存名单到 TXT”**，把得到的 `OfficeBridge-Windows-fonts.txt` 带回 Mac。在需要检查的文件下展开“字体设置”，点 **“导入字体名单 (.txt)”**。
+4. 展开 **“查看文档字体对照”**。内置建议会保留已列入的原字体，仅建议使用名单里有的目标名称。自己添加的规则可以替换已列入的原字体。新设置生效会清除当前文件的旧选择和待下载副本。
+5. “移除名单并重新检查”可恢复常规建议。名单仅用于当前文件。导出的 HTML 和 JSON 报告只列出文档字体的对照及名称总数，完整名单可通过“保存名单到 TXT”单独导出。
+
+如果浏览器未提供读取按钮或你选择拒绝权限，可用记事本每行写一个已确认的字体家族名称，以 UTF-8 保存。也可以在接收方的 **Windows PowerShell** 粘贴下面的命令，在桌面生成带时间戳的名单，然后用“导入字体名单”打开。
+
+```powershell
+Add-Type -AssemblyName System.Drawing
+$fontListPath = Join-Path ([Environment]::GetFolderPath('Desktop')) ("OfficeBridge-fonts-{0:yyyyMMdd-HHmmssfff}.txt" -f (Get-Date))
+(New-Object System.Drawing.Text.InstalledFontCollection).Families | ForEach-Object { $_.Name; $_.GetName(1033) } | Sort-Object -Unique | Set-Content -Encoding UTF8 -LiteralPath $fontListPath
+```
+
+名称未列入时，可再核对本地化名称、Office 云字体或嵌入字体。即使名称相同，也需要核对字重、字符覆盖和换行。浏览器只在用户主动点击并允许后读取字体家族名称。[Chromium 本机字体接口](https://developer.chrome.com/docs/capabilities/web-apis/local-fonts) · [Windows 系统字体枚举](https://learn.microsoft.com/en-us/dotnet/api/system.drawing.text.installedfontcollection)
 
 如果你已知道合适的目标字体：
 
-1. 在该文件结果中展开 **“高级：自定义字体替换”**。
+1. 在该文件结果中展开 **“字体设置：目标名单与自定义替换”**。
 2. 在“原字体”选择文档里的字体，在“目标字体”填写接收方确认可用的字体名称，例如 `Microsoft YaHei`。
 3. 点击 **“添加规则并重新检查”**。
 4. 重新检查完成后，再勾选新建议，点击 **“生成修复副本”**，然后 **“下载修复副本”**。

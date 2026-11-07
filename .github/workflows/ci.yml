@@ -39,6 +39,34 @@ jobs:
         run: npm run build
       - name: Build portable application
         run: npm run build:portable
+      - name: Install independent office reader and PDF tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -q update
+          sudo apt-get -yq install --no-install-recommends libreoffice-calc libreoffice-impress poppler-utils fonts-noto-cjk
+      - name: Prepare pinned Windows office reader and PDF tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'office-reader.msi'
+          $archive = Join-Path $env:RUNNER_TEMP 'pdf-tools.zip'
+          $pdfTools = Join-Path $env:RUNNER_TEMP 'pdf-tools'
+          curl.exe -fsSL --retry 2 'https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/x86_64/LibreOffice_26.8.2_Win_x86-64.msi' -o $installer
+          if ($LASTEXITCODE -ne 0) {
+            curl.exe -fsSL --retry 2 'https://downloadarchive.documentfoundation.org/libreoffice/old/26.8.2.2/win/x86_64/LibreOffice_26.8.2.2_Win_x86-64.msi' -o $installer
+          }
+          if ((Get-FileHash $installer).Hash -ne 'FF4B911403B67EE9E6249F820F9782C44BB32C94FDAA45B0DA53A8E419E5307A') { throw 'Office reader checksum mismatch' }
+          curl.exe -fsSL --retry 2 'https://github.com/oschwartz10612/poppler-windows/releases/download/v26.09.0-0/Release-26.09.0-0.zip' -o $archive
+          if ((Get-FileHash $archive).Hash -ne '7A6F256A0DDF7536182246A5733331BF4677CBCC34F4663774947AD34556C8D0') { throw 'PDF tools checksum mismatch' }
+          $install = Start-Process msiexec -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($install.ExitCode -notin 0,3010) { throw "Office reader installation failed: $($install.ExitCode)" }
+          Join-Path $env:ProgramFiles 'LibreOffice\program' >> $env:GITHUB_PATH
+          Expand-Archive -Path $archive -DestinationPath $pdfTools
+          (Get-ChildItem $pdfTools -Recurse -Filter pdftoppm.exe | Select-Object -First 1).DirectoryName >> $env:GITHUB_PATH
+      - name: Open, recalculate and render original and repaired synthetic files
+        if: runner.os != 'macOS'
+        run: python scripts/test-libreoffice.py
       - name: Parse optional Windows checker using Windows PowerShell 5.1
         if: runner.os == 'Windows'
         shell: powershell

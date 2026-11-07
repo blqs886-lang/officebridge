@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { XMLSerializer } from '@xmldom/xmldom';
 import { scanPptx } from '../src/engine/pptx.js';
 import { NS, parseXml } from '../src/engine/xml.js';
-import { readArchive } from '../src/engine/archive.js';
+import { readArchive, writeArchive } from '../src/engine/archive.js';
 import { createDemo } from '../src/engine/demo.js';
+import { analyzeOffice, repairOffice } from '../src/engine/index.js';
 
 const namespaces = `xmlns:p="${NS.p}" xmlns:a="${NS.a}" xmlns:r="${NS.r}"`;
 const presentation = `<p:presentation ${namespaces}><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`;
@@ -261,4 +262,103 @@ test('complete synthetic presentation remains concise despite a large default th
   assert.equal(new Set(themeFindings.map(issue => issue.part)).size, themeFindings.length);
   assert.equal(result.issues.filter(issue => issue.code === 'PPTX_ADVANCED_GRAPHICS').length, 0);
   assert.ok(result.issues.length < 20, `Unexpected report noise: ${result.issues.length} findings`);
+});
+
+test('private-use text, fields, inherited run fonts and custom bullets suppress only affected part/font pairs', () => {
+  const body = `<a:p><a:pPr><a:buFont typeface="Corporate Bullet"/><a:buChar char="&#xE011;"/><a:defRPr>${font('Corporate Default')}</a:defRPr></a:pPr>
+    <a:r><a:rPr>${font('Corporate Mark')}</a:rPr><a:t>&#xF0001;</a:t></a:r>
+    <a:fld id="{B3C83EEB-F974-458C-9CA9-BE2BEC563B8D}" type="custom"><a:t>&#xE123;</a:t></a:fld>
+    <a:r><a:rPr>${font('Helvetica Neue')}</a:rPr><a:t>普通可编辑正文</a:t></a:r>
+    <a:r><a:rPr>${font('Corporate Mark')}</a:rPr><a:t>同部件的同名字体</a:t></a:r>
+  </a:p>`;
+  const result = scanPptx(context({
+    'ppt/slides/slide1.xml': slide(body),
+    'ppt/slides/slide2.xml': slide(`<a:p><a:r><a:rPr>${font('Corporate Mark')}</a:rPr><a:t>普通文字</a:t></a:r></a:p>`),
+  }, { fontMappings: { 'Corporate Mark': 'Arial', 'Corporate Bullet': 'Arial', 'Corporate Default': 'Arial' } }));
+  const first = result.issues.filter(i => i.part === 'ppt/slides/slide1.xml');
+  assert.deepEqual(first.filter(i => i.fixable).map(i => i.fix.from), ['Helvetica Neue']);
+  for (const name of ['Corporate Mark', 'Corporate Default', 'Corporate Bullet']) {
+    assert.ok(first.some(i => !i.fixable && i.code === 'PPTX_SYMBOL_FONT' && i.title.includes(name) && i.description.includes('私用区')));
+  }
+  assert.ok(result.issues.some(i => i.part === 'ppt/slides/slide2.xml' && i.fix?.from === 'Corporate Mark'));
+});
+
+test('unresolved private-use font inheritance is reported without blocking unrelated fonts or inventing an association', () => {
+  const result = scanPptx(context({ 'ppt/slides/slide1.xml': slide(`<a:p><a:r><a:t>&#xE123;</a:t></a:r></a:p>
+    <a:p><a:r><a:rPr>${font('Helvetica Neue')}</a:rPr><a:t>普通文字</a:t></a:r></a:p>`) }));
+  assert.ok(result.issues.some(i => i.code === 'PPTX_PRIVATE_USE_GLYPHS'));
+  assert.ok(!result.issues.some(i => i.code === 'PPTX_SYMBOL_FONT'));
+  assert.ok(result.issues.some(i => i.fix?.from === 'Helvetica Neue'));
+});
+
+test('order, hidden slides, slide relationships and shared charts resolve to actual document pages', () => {
+  const relationships = records => `<Relationships xmlns="${NS.rel}">${records.join('')}</Relationships>`;
+  const rel = (id, kind, target, mode = '') => `<Relationship Id="${id}" Type="${NS.r}/${kind}" Target="${target}" ${mode}/>`;
+  const result = scanPptx(context({
+    'ppt/presentation.xml': `<p:presentation ${namespaces}><p:sldIdLst><p:sldId id="305" r:id="first"/><p:sldId id="257" r:id="second"/></p:sldIdLst><p:custShowLst><p:custShow name="自定义放映" id="1"><p:sldLst><p:sld r:id="second"/></p:sldLst></p:custShow></p:custShowLst></p:presentation>`,
+    'ppt/_rels/presentation.xml.rels': relationships([rel('second', 'slide', '/ppt/slides/slide7.xml'), rel('first', 'slide', './slides/%73lide42.xml')]),
+    'ppt/slides/slide42.xml': slide(font('Helvetica')).replace('<p:sld ', '<p:sld show="0" '),
+    'ppt/slides/slide7.xml': slide(font('Helvetica')),
+    'ppt/slides/slide99.xml': slide(font('Helvetica')),
+    'ppt/slides/_rels/slide42.xml.rels': relationships([rel('movie', 'video', '../demo.mov', 'TargetMode="External"'), rel('chart', 'chart', '../charts/chart2.xml')]),
+    'ppt/slides/_rels/slide7.xml.rels': relationships([rel('chart', 'chart', '../charts/chart2.xml'), rel('notes', 'notesSlide', '../notesSlides/notesSlide9.xml')]),
+    'ppt/charts/chart2.xml': `<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="${NS.a}">${font('Helvetica')}</c:chartSpace>`,
+    'ppt/notesSlides/notesSlide9.xml': `<p:notes ${namespaces}>${font('Helvetica')}</p:notes>`,
+  }));
+  const where = part => result.issues.find(i => i.part === part)?.location;
+  assert.equal(result.inventory.slideCount, 2);
+  assert.equal(result.inventory.slidePartCount, 3);
+  assert.match(where('ppt/slides/slide42.xml'), /第 1 张幻灯片.*已隐藏/);
+  assert.match(where('ppt/slides/_rels/slide42.xml.rels'), /第 1 张幻灯片/);
+  assert.match(where('ppt/slides/slide7.xml'), /第 2 张幻灯片/);
+  assert.match(where('ppt/charts/chart2.xml'), /第 1、2 张幻灯片/);
+  assert.match(where('ppt/notesSlides/notesSlide9.xml'), /第 2 张幻灯片/);
+  assert.match(where('ppt/slides/slide99.xml'), /不一定是播放顺序/);
+});
+
+test('mixed-size hard lines use their own font sizes for the overflow heuristic', () => {
+  const lines = [6000, 1000, 1000, 1000].map(sz => `<a:r><a:rPr sz="${sz}"/><a:t>文字</a:t></a:r>`).join('<a:br/>');
+  const shape = h => textShape({ height: h, bodyAttributes: 'tIns="0" bIns="0"' }).replace(/<a:p>.*?<\/a:p>/, `<a:p>${lines}</a:p>`);
+  const report = scanPptx(context({ 'ppt/slides/slide1.xml': slide(shape(100 * 12700)), 'ppt/slides/slide2.xml': slide(shape(45 * 12700)) }));
+  const findings = report.issues.filter(i => i.code === 'PPTX_TEXT_OVERFLOW_HEURISTIC');
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].part, 'ppt/slides/slide2.xml');
+  assert.match(findings[0].evidence, /90\.0 pt/);
+});
+
+test('PPTX font inventory uses only supported declarations and distinguishes an imported list from actual glyph coverage', () => {
+  const result = scanPptx(context({
+    'ppt/presentation.xml': `<p:presentation ${namespaces}><p:embeddedFontLst><p:embeddedFont><p:font typeface="Studio Family"/></p:embeddedFont></p:embeddedFontLst></p:presentation>`,
+    'ppt/slides/slide1.xml': slide(`<a:ext uri="urn:vendor"><a:opaqueStyle typeface="Never scan this name"/></a:ext>${font('Studio Family')}${font('Arial')}`),
+  }, { targetFonts: ['Arial'] }));
+  assert.ok(result.inventory.notes.some(note => note.includes('按导入的字体名称名单对照')));
+  assert.ok(!result.inventory.fonts.some(f => f.name === 'Never scan this name'));
+  const finding = result.issues.find(i => i.code === 'PPTX_FONT_UNVERIFIED');
+  assert.ok(finding && /导入的目标电脑字体名单未列出/.test(finding.description));
+  assert.match(finding.description, /嵌入了此字体.*子集/);
+  assert.ok(!result.issues.some(i => i.fixable));
+});
+
+test('repairing a reordered, editable presentation preserves private-use logos, native charts, notes and chart data', async () => {
+  const entries = readArchive(createDemo('pptx')).entries, dec = new TextDecoder(), enc = new TextEncoder();
+  const main = 'ppt/presentation.xml', part = 'ppt/slides/slide1.xml';
+  const reordered = dec.decode(entries.get(main)).replace(/(<p:sldId\b[^>]+\/>)(<p:sldId\b[^>]+\/>)/, '$2$1');
+  entries.set(main, enc.encode(reordered));
+  const mark = '<a:p><a:pPr><a:buFont typeface="Studio Brand"/><a:buChar char="&#xE011;"/></a:pPr><a:r><a:rPr><a:latin typeface="Studio Brand"/></a:rPr><a:t>&#xE002;</a:t></a:r></a:p>';
+  const before = dec.decode(entries.get(part)).replace('</p:txBody>', `${mark}</p:txBody>`);
+  entries.set(part, enc.encode(before));
+  const bytes = writeArchive(entries), input = bytes.slice(), options = { fontMappings: { 'Studio Brand': 'Arial' } };
+  const report = await analyzeOffice(bytes, 'brand.pptx', options);
+  const chosen = report.issues.find(i => i.part === part && i.fix?.from === 'PingFang SC');
+  assert.match(chosen.location, /第 2 张幻灯片/);
+  assert.ok(!report.issues.some(i => i.fix?.from === 'Studio Brand'));
+  const repaired = await repairOffice(bytes, 'brand.pptx', { ...options, selectedIssueIds: [chosen.id] });
+  const output = readArchive(repaired.bytes).entries;
+  assert.equal(repaired.changes.length, 1);
+  assert.equal(dec.decode(output.get(part)), before.replaceAll('<a:latin typeface="PingFang SC"', '<a:latin typeface="Microsoft YaHei"'));
+  assert.deepEqual(bytes, input);
+  for (const [name, data] of entries) if (name !== part) assert.deepEqual(output.get(name), data, name);
+  assert.ok([...entries.keys()].some(name => /^ppt\/embeddings\/.*\.xlsx$/.test(name)));
+  assert.equal(repaired.report.inventory.chartCount, 1);
+  assert.equal(repaired.report.validation.windowsOfficeTested, false);
 });

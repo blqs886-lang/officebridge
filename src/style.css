@@ -2851,3 +2851,14 @@ button,summary {
   .font-rule { flex-direction: column; align-items: flex-start; gap: 6px; }
   .font-settings .button { width: 100%; white-space: normal; }
 }
+
+.target-font-list {
+  border-bottom: 1px solid var(--border, #dce3ec);
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+.font-settings-body h4 { margin: 8px 0 4px; font-size: 14px; }
+.target-font-list p { margin: 6px 0; line-height: 1.65; }
+.font-list-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+.target-font-list summary { cursor: pointer; }

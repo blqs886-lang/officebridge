@@ -1,4 +1,6 @@
 import './style.css';
+import { bindFontList, renderFontList } from './ui/font-list.js';
+import { listedFont } from './engine/target-fonts.js';
 import EngineWorker from './ui/worker.js?worker&inline';
 import { escapeHtml, formatBytes, safeFileName, exportPayload, buildHtmlReport, downloadBlob } from './ui/reports.js';
 import { donationUrl, label as donationLabel, validateDonationUrl } from './support-config.js';
@@ -375,23 +377,25 @@ function renderFontSettings(record) {
   const mappings = Object.entries(record.options?.fontMappings || {});
   const disabled = isDocumentBusy(record) || record.report.repairBlocked;
   return `<details class="font-settings" id="font-settings" ${record.advancedOpen ? 'open' : ''}>
-    <summary>高级：自定义字体替换 <span>${mappings.length ? `${mappings.length} 条当前文件规则` : '按需设置'}</span></summary>
+    <summary>字体设置：目标名单与自定义替换 <span>${mappings.length ? `${mappings.length} 条当前文件规则` : '按需设置'}</span></summary>
     <div class="font-settings-body">
-      <p>仅对当前文件生效。目标电脑必须已经安装所填字体；替换可能改变字宽、换行和排版。下方常见字体只是候选，不能证明目标电脑具备。</p>
+      ${renderFontList(record, isDocumentBusy(record))}
+      <h4>自定义字体替换</h4><p>规则仅对当前文件生效。目标字体会影响字宽和换行。没有目标名单时，下方列出常见候选字体。</p>
       <p class="font-settings-caution">此处不适用于符号、数学或图标字体。普通字体替换可能改变字符含义，请在原始应用中处理。</p>
       ${record.report.repairBlocked ? '<p class="font-settings-error">当前文件禁止修复，不能添加字体规则。</p>' : ''}
-      ${record.reanalysisError ? `<p class="font-settings-error" role="alert">规则未应用：${esc(record.reanalysisError)} 已保留上次有效的检查结果。</p>` : ''}
+      ${record.reanalysisError ? `<p class="font-settings-error" role="alert">设置未应用：${esc(record.reanalysisError)} 已保留上次有效的检查结果。</p>` : ''}
       <form id="font-rule-form"><fieldset ${disabled ? 'disabled' : ''}><div class="font-rule-fields">
         <label for="font-source">原字体<select id="font-source" name="source" required><option value="">选择文档中的字体</option>${fonts.map((font) => `<option value="${esc(font)}">${esc(font)}</option>`).join('')}</select></label>
         <span class="font-rule-arrow" aria-hidden="true">${icon('arrow')}</span>
         <label for="font-target">目标字体<input id="font-target" name="target" type="text" list="font-target-candidates" maxlength="128" required placeholder="例如 Microsoft YaHei" autocomplete="off"></label>
-        <datalist id="font-target-candidates">${['Microsoft YaHei', 'Arial', 'SimSun', 'Microsoft JhengHei', 'Calibri', 'Times New Roman', 'Consolas', 'KaiTi'].map((font) => `<option value="${font}"></option>`).join('')}</datalist>
+        <datalist id="font-target-candidates">${(record.options.targetFonts || ['Microsoft YaHei', 'Arial', 'SimSun', 'Microsoft JhengHei', 'Calibri', 'Times New Roman', 'Consolas', 'KaiTi']).map((font) => `<option value="${esc(font)}"></option>`).join('')}</datalist>
       </div><button class="button secondary compact" id="add-font-rule" type="submit" ${!fonts.length ? 'disabled' : ''}>${record.status === 'reanalyzing' ? '<span class="spinner small"></span> 正在重新检查…' : '添加规则并重新检查'}</button><p class="font-rule-help">同一原字体会更新现有规则。重新检查会清空已选项和旧副本；之后仍需勾选并生成，才会修改新副本。</p></fieldset></form>
-      <div id="font-rules" class="font-rules">${mappings.length ? mappings.map(([from, to]) => `<div class="font-rule"><span><strong>${esc(from)}</strong>${icon('arrow')}<strong>${esc(to)}</strong></span><button type="button" class="subtle-button" data-remove-font="${esc(from)}" aria-label="移除 ${esc(from)} 替换规则" ${disabled ? 'disabled' : ''}>移除并重新检查</button></div>`).join('') : '<p class="font-rules-empty">尚未设置自定义规则，当前使用内置建议。</p>'}</div>
+      <div id="font-rules" class="font-rules">${mappings.length ? mappings.map(([from, to]) => `<div class="font-rule"><span><strong>${esc(from)}</strong>${icon('arrow')}<strong>${esc(to)}</strong>${record.options.targetFonts && !listedFont(record.options.targetFonts, to) ? '（目标名单未列出，此规则停用）' : ''}</span><button type="button" class="subtle-button" data-remove-font="${esc(from)}" aria-label="移除 ${esc(from)} 替换规则" ${disabled ? 'disabled' : ''}>移除并重新检查</button></div>`).join('') : '<p class="font-rules-empty">尚未设置自定义规则。</p>'}</div>
     </div></details>`;
 }
 
 function bindFontSettings(record, panel) {
+  bindFontList(record, panel, changes => reanalyzeWithOptions(record, changes));
   const details = panel.querySelector('#font-settings');
   details.addEventListener('toggle', () => { record.advancedOpen = details.open; });
   panel.querySelector('#font-rule-form').addEventListener('submit', (event) => {
@@ -401,36 +405,39 @@ function bindFontSettings(record, panel) {
     const to = panel.querySelector('#font-target').value.trim();
     if (!availableFontNames(record).includes(from) || !to) return;
     if (from.trim().toLowerCase() === to.toLowerCase()) { toast('原字体与目标字体相同，无需添加替换规则。', 'error'); return; }
+    if (record.options.targetFonts && !listedFont(record.options.targetFonts, to)) {
+      toast('目标名单没有这个名称。请从名单中选一个已确认的字体。', 'error'); return;
+    }
     const mappings = { ...(record.options?.fontMappings || {}), [from]: to };
-    reanalyzeWithMappings(record, mappings);
+    reanalyzeWithOptions(record, () => ({ fontMappings: mappings }));
   });
   panel.querySelectorAll('[data-remove-font]').forEach((button) => button.addEventListener('click', () => {
     if (isDocumentBusy(record) || record.report.repairBlocked) return;
     const mappings = Object.fromEntries(Object.entries(record.options?.fontMappings || {}).filter(([from]) => from !== button.dataset.removeFont));
-    reanalyzeWithMappings(record, mappings);
+    reanalyzeWithOptions(record, () => ({ fontMappings: mappings }));
   }));
 }
 
-async function reanalyzeWithMappings(record, fontMappings) {
-  if (isDocumentBusy(record) || record.report.repairBlocked) return;
+async function reanalyzeWithOptions(record, readChanges) {
+  if (isDocumentBusy(record)) return;
   record.status = 'reanalyzing';
   record.advancedOpen = true;
   record.reanalysisError = null;
-  record.repaired = null;
-  record.selected.clear();
-  state.filter = 'all';
   renderRecord(record);
-  const options = { ...record.options, fontMappings };
   try {
+    const options = { ...record.options, ...(await readChanges()) };
     const bytes = new Uint8Array(await record.file.arrayBuffer());
     const report = await request('analyze', { bytes, fileName: record.name, options }, [bytes.buffer]);
     record.report = report;
-    record.options = report.analysisOptions || options;
+    record.options = { ...options, ...report.analysisOptions };
+    record.repaired = null;
+    record.selected.clear();
+    if (record.id === state.activeId) state.filter = 'all';
     announce(`${record.name} 已按当前字体规则重新检查。尚未选择或应用任何替换。`);
-    toast('字体规则已更新并重新检查，请确认后选择需要应用的替换。');
+    toast('字体设置已更新并重新检查，请确认后选择需要应用的替换。');
   } catch (error) {
     record.reanalysisError = error.message;
-    announce(`字体规则没有应用：${error.message}`);
+    announce(`字体设置没有应用：${error.message}`);
   }
   record.status = 'ready';
   renderRecord(record);

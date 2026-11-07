@@ -18,7 +18,7 @@ Change: `{ issueId, part, kind, before, after, count }`.
 Format scanner exports `scanPptx(context)` / `scanXlsx(context)` returning
 `{ issues, inventory }`. Context is `{ entries: Map<string, Uint8Array>,
 xml: Map<string, Document>, texts: Map<string, string>, options }`.
-Options: `{ fontProfile: 'windows-office'|'cross-platform', fontMappings?: object }`.
+Options: `{ fontProfile: 'windows-office', fontMappings?: object, targetFonts?: string[] }`. With a target list, reports include only the count and document family matches under `inventory.targetFontComparison`. The caller keeps the list for repair.
 Scanners only inspect. Use predictable IDs from code + part + index; avoid random IDs.
 All UI copy in Chinese. English code identifiers. No numeric compatibility score.
 

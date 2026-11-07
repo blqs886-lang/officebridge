@@ -1,6 +1,6 @@
 # 架构与保真边界
 
-OfficeBridge v0.1.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；没有调用 Office 排版、重算或媒体播放引擎。
+OfficeBridge v0.2.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；没有调用 Office 排版、重算或媒体播放引擎。
 
 ## 数据流
 
@@ -33,7 +33,7 @@ OfficeBridge v0.1.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js 
 | `scripts/build-portable.mjs` | 将构建产物内联为独立 HTML，限制网络连接 |
 | `scripts/verify-windows.ps1` | 可选的 Windows 桌面 Office 实际打开检查，独立于浏览器报告 |
 
-数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v0.1.0 的主要目标是 Windows Office 常见字体环境；常见字体清单不代表已检查收件人的安装情况。
+数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v0.2.0 的主要目标是 Windows Office 常见字体环境；可按用户导入的目标名单筛选建议。完整名单留在当前文件的会话中。
 
 ## 修改哪些内容
 

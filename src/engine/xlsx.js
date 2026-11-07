@@ -1,5 +1,6 @@
-import { NS, elements, attribute } from './xml.js';
+import { NS, elements, attribute, fontAttribute } from './xml.js';
 import { fontAdvice, isKnownFont, isProtectedFont } from './fonts.js';
+import { formulaTokens } from './xlsx-formula.js';
 
 const DYNAMIC_NS = 'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray';
 const RECENT_FUNCTIONS = new Set([
@@ -14,8 +15,8 @@ const DEPENDENT_FUNCTIONS = new Set([
   'CUBEVALUE', 'CUBEMEMBER', 'CUBESET', 'CUBESETCOUNT', 'CUBERANKEDMEMBER',
   'CUBEMEMBERPROPERTY', 'CUBEKPIMEMBER',
 ]);
-const FONT_ELEMENTS = new Set(['latin', 'ea', 'cs', 'sym', 'buFont', 'font']);
 const TRUE = new Set(['1', 'true']);
+const PRIVATE_USE = /[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/u;
 
 function children(node, ns, localName) {
   const result = [];
@@ -27,7 +28,7 @@ function children(node, ns, localName) {
 
 function first(node, ns, localName) { return children(node, ns, localName)[0]; }
 function isTrue(value) { return TRUE.has(value); }
-function sample(items) { return items.slice(0, 12).join('、') + (items.length > 12 ? ` 等 ${items.length} 处` : ''); }
+function sample(items, count = items.length) { return items.slice(0, 12).join('、') + (count > 12 ? ` 等 ${count} 处` : ''); }
 function compact(text, length = 160) { return text.length > length ? `${text.slice(0, length)}…` : text; }
 
 function isWebHyperlink(target) {
@@ -67,11 +68,14 @@ function worksheetNames(xml) {
 
 function readStyles(xml) {
   const styles = xml.get('xl/styles.xml');
-  if (!styles) return { xfs: [], numberFormats: new Map(), fontSizes: [] };
+  if (!styles) return { xfs: [], baseXfs: [], numberFormats: new Map(), fontSizes: [], fontNames: [] };
   const numberFormats = new Map(elements(styles, NS.s, 'numFmt').map(node => [attribute(node, 'numFmtId'), attribute(node, 'formatCode')]));
   const xfs = children(elements(styles, NS.s, 'cellXfs')[0], NS.s, 'xf');
-  const fontSizes = children(elements(styles, NS.s, 'fonts')[0], NS.s, 'font').map(font => Number(attribute(first(font, NS.s, 'sz'), 'val', '11')) || 11);
-  return { xfs, numberFormats, fontSizes };
+  const baseXfs = children(elements(styles, NS.s, 'cellStyleXfs')[0], NS.s, 'xf');
+  const fonts = children(elements(styles, NS.s, 'fonts')[0], NS.s, 'font');
+  const fontSizes = fonts.map(font => Number(attribute(first(font, NS.s, 'sz'), 'val', '11')) || 11);
+  const fontNames = fonts.map(font => attribute(first(font, NS.s, 'name'), 'val'));
+  return { xfs, baseXfs, numberFormats, fontSizes, fontNames };
 }
 
 function richText(node) {
@@ -132,29 +136,47 @@ function numericPrecisionRisk(raw) {
   const integer = match[2].replace(/^0+/, '');
   const decimals = match[3] ?? '';
   const significant = (match[2] + decimals).replace(/^0+/, '').replace(/0+$/, '');
+  if (!significant) return false;
   const exponent = Number(match[4] ?? '0');
   const integerLength = integer ? integer.length + exponent : exponent - (decimals.match(/^0*/)?.[0].length ?? 0);
   return significant.length > 15 || integerLength > 15;
 }
 
+function usesZeroPadding(raw, format) {
+  if (!raw || !format.includes('00') || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?$/.test(raw)) return false;
+  // Recognize ordinary positive/negative/zero sections only. Conditions,
+  // quoted strings, escapes and locale-specific masks need a real renderer.
+  if (/[\[\]"\\]/.test(format)) return false;
+  const value = Number(raw), sections = format.split(';');
+  const section = value < 0 ? (sections[1] ?? sections[0]) : value === 0 ? (sections[2] ?? sections[0]) : sections[0];
+  const mask = /^-?(0{2,})$/.exec(section);
+  return !!mask && Number.isFinite(value) && Math.round(Math.abs(value)) < 10 ** (mask[1].length - 1);
+}
+
 function formulaFeatures(formula) {
-  // Quoted text and quoted sheet names must not be treated as function calls.
-  const code = formula.replace(/"(?:[^"]|"")*"/g, '""').replace(/'(?:[^']|'')*'/g, "''");
-  const names = [...code.matchAll(/(?:^|[^A-Z0-9_.])([A-Z_][A-Z0-9_.]*)\s*\(/gi)].map(match => match[1].toUpperCase());
+  const { calls, literalLinks, external } = formulaTokens(formula);
+  const names = [...calls];
   const recent = names.filter(name => /^_XLFN\.|^_XLWS\./.test(name) || RECENT_FUNCTIONS.has(name));
   const dependent = names.filter(name => /^_XLL\./.test(name) || DEPENDENT_FUNCTIONS.has(name.replace(/^_XLFN\.(?:_XLWS\.)?/, '')));
-  // External references use a workbook-index/name followed by a sheet and !.
-  // Table structured references, e.g. Table1[Amount], are not external links.
-  const withoutStrings = formula.replace(/"(?:[^"]|"")*"/g, '""');
-  const external = /'(?:[^']|'')*\[[^\]]+\](?:[^']|'')*'!|(?:^|[^A-Z0-9_])\[[^\]]+\][^'!+\-*/^&=<>(),;\s]+!/i.test(withoutStrings);
-  return { recent, dependent, external };
+  const localLink = [...literalLinks].some(target => {
+    const path = target.trim();
+    // A leading # links within this workbook. [Book.xlsx]Sheet may also refer
+    // to this workbook: without a path, do not claim it must be distributed.
+    if (!path || path.startsWith('#') || isWebHyperlink(path)) return false;
+    if (/^https?:/i.test(path)) {
+      try { return !!new URL(path).hostname; } catch { return false; }
+    }
+    return /^(?:file:|smb:|[A-Za-z]:[\\/])/i.test(path)
+      || (!/^[a-z][a-z\d+.-]*:/i.test(path) && (/[\\/]/.test(path) || /^[^:[\]]+\.[a-z\d]{1,12}(?:#.*)?$/i.test(path)));
+  });
+  return { recent, dependent, external, localLink };
 }
 
 function scanOtherFormulas(ctx, add) {
   const formulaLocals = new Set(['formula', 'formula1', 'formula2', 'calculatedColumnFormula', 'totalsRowFormula']);
   for (const [part, doc] of ctx.xml) {
     if (!part.startsWith('xl/')) continue;
-    const grouped = { recent: [], dependent: [], external: [] };
+    const grouped = { recent: [], dependent: [], external: [], localLink: [] };
     for (const node of elements(doc, NS.s, '*')) {
       if (!formulaLocals.has(node.localName) && node.localName !== 'definedName') continue;
       const features = formulaFeatures(node.textContent ?? '');
@@ -165,6 +187,7 @@ function scanOtherFormulas(ctx, add) {
       if (features.recent.length && node.localName !== 'definedName') grouped.recent.push(`${location}（${[...new Set(features.recent)].join('、')}）`);
       if (features.dependent.length) grouped.dependent.push(`${location}（${[...new Set(features.dependent)].join('、')}）`);
       if (features.external) grouped.external.push(location);
+      if (features.localLink) grouped.localLink.push(location);
     }
     if (grouped.recent.length) add('OTHER_FORMULA_VERSION', part, {
       severity: 'warning', title: '条件、验证或表公式需要核对软件版本',
@@ -181,24 +204,33 @@ function scanOtherFormulas(ctx, add) {
       description: '这些公式依赖文件外的工作簿，换电脑后需重新确认源文件位置和访问权限。',
       evidence: compact(sample(grouped.external), 800), recommendation: '保留所需源文件，并在目标 Excel 中检查名称、规则和链接的结果。',
     });
+    if (grouped.localLink.length) add('OTHER_FORMULA_FILE_HYPERLINK', part, {
+      severity: 'warning', title: '名称或规则公式中的链接指向外部文件或本机地址',
+      description: 'HYPERLINK 的固定目标是文件路径或本机地址。它可能依赖发送方的目录、共享文件夹或服务。',
+      evidence: compact(sample(grouped.localLink), 800),
+      recommendation: '核对文件随附、相对目录和接收方权限，再在目标电脑打开链接。工具不会访问或改写地址。',
+    });
   }
 }
 
-function scanFonts(ctx, add, inventory) {
+function scanFonts(ctx, add, inventory, privateStyleFonts) {
   const fonts = new Map();
   for (const [part, doc] of ctx.xml) {
     if (!part.startsWith('xl/')) continue;
     const groups = new Map();
     for (const node of elements(doc, '*', '*')) {
-      let name;
-      if (node.namespaceURI === NS.a && FONT_ELEMENTS.has(node.localName)) name = attribute(node, 'typeface');
-      if (node.namespaceURI === NS.s && ((node.localName === 'name' && node.parentNode?.localName === 'font') || node.localName === 'rFont')) name = attribute(node, 'val');
+      const keyName = fontAttribute(node);
+      const name = keyName && attribute(node, keyName);
       if (!name || /^\+(?:mj|mn)-/.test(name)) continue;
       const key = `${node.namespaceURI}\0${name}`;
       const group = groups.get(key) ?? { name, scope: node.namespaceURI, count: 0, supplemental: 0, symbolSensitive: false };
       group.count += 1;
-      if (node.localName === 'sym' || attribute(node, 'charset') === '2'
-        || attribute(first(node.parentNode, NS.s, 'charset'), 'val') === '2'
+      const richRun = node.localName === 'rFont' ? node.parentNode?.parentNode : null;
+      const privateRichText = richRun?.namespaceURI === NS.s && richRun.localName === 'r'
+        && children(richRun, NS.s, 't').some(t => PRIVATE_USE.test(decodeSpreadsheetText(t.textContent)));
+      if (node.localName === 'sym' || Number(attribute(node, 'charset')) === 2
+        || Number(attribute(first(node.parentNode, NS.s, 'charset'), 'val')) === 2
+        || privateRichText || (part === 'xl/styles.xml' && node.namespaceURI === NS.s && privateStyleFonts.has(name))
         || isProtectedFont(name)) group.symbolSensitive = true;
       if (node.namespaceURI === NS.a && node.localName === 'font' && attribute(node, 'script')
         && ['majorFont', 'minorFont'].includes(node.parentNode?.localName)) group.supplemental += 1;
@@ -214,7 +246,7 @@ function scanFonts(ctx, add, inventory) {
       if (symbolSensitive && (advice || !isKnownFont(name, ctx.options ?? {}))) {
         add('SYMBOL_FONT_REVIEW', part, {
           severity: 'warning', title: `符号或数学字体「${name}」需要保留并核对`,
-          description: '此字体声明带有符号、数学或特殊字符集线索，普通字体替换可能把符号变成其他字符。当前不提供自动替换。',
+          description: '此字体与符号、数学、特殊字符集或私用区字符有关，普通字体替换可能让图标变成方框或其他符号。当前保留这项字体声明。',
           evidence: `在此部件中发现 ${count} 处同名字体声明。`,
           recommendation: '在目标电脑确认原字体与字符可用，再在原始应用中检查符号的含义和显示。',
         });
@@ -231,7 +263,9 @@ function scanFonts(ctx, add, inventory) {
       } else if (!isKnownFont(name, ctx.options ?? {})) {
         add('FONT_UNVERIFIED', part, {
           severity: 'info', title: `字体「${name}」尚未验证`,
-          description: '无法从文件确认目标 Windows 电脑是否安装此字体。缺失时可能发生替换、换行或表格文字截断。',
+          description: ctx.options?.targetFonts?.length
+            ? '导入的目标电脑字体名单未列出此名称。其他语言的名称和 Office 云字体可能另外可用；请核对实际显示。'
+            : '无法从文件确认目标 Windows 电脑是否安装此字体。缺失时可能发生替换、换行或表格文字截断。',
           evidence: `在此部件中发现 ${count} 处字体声明。`,
           recommendation: '在目标电脑安装获得授权的字体，或在原始 Excel 中更换为接收方确认可用的字体。',
         });
@@ -258,6 +292,12 @@ function scanWorkbook(ctx, add, inventory) {
     description: 'Windows 和 Mac Excel 都支持此设置，直接打开不代表日期有错。与 1900 日期系统的工作簿复制或外部链接日期时，需核对 1462 天的基准差异。',
     evidence: 'workbookPr date1904 为 true / 1。',
     recommendation: '保持原日期系统，并核对跨工作簿传递的日期；本工具不转换日期或改写序列值。',
+  });
+  if (isTrue(attribute(first(workbook.documentElement, NS.s, 'workbookProtection'), 'lockStructure'))) add('WORKBOOK_STRUCTURE_PROTECTED', part, {
+    severity: 'info', title: '工作簿已保护工作表结构',
+    description: '原文件限制新增、删除、移动或重命名工作表；这并不表示所有单元格都不能编辑。字体修复副本会保留此设置。',
+    evidence: 'workbookProtection 的 lockStructure 已开启。',
+    recommendation: '需要调整工作表结构时，请原作者提供允许相应编辑的副本。',
   });
   const calculation = elements(workbook, NS.s, 'calcPr')[0];
   if (attribute(calculation, 'calcMode') === 'manual') add('MANUAL_CALCULATION', part, {
@@ -288,21 +328,38 @@ function scanWorkbook(ctx, add, inventory) {
   }
 }
 
-function scanSheet(ctx, part, doc, name, styles, strings, add, inventory) {
+function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privateStyleFonts) {
   const cells = elements(doc, NS.s, 'c');
   const sheet = { name, part, cellCount: cells.length, formulaCount: 0 };
+  if (isTrue(attribute(first(doc.documentElement, NS.s, 'sheetProtection'), 'sheet'))) add('WORKSHEET_EDIT_PROTECTED', part, {
+    severity: 'info', title: '此工作表已启用单元格保护', location: name,
+    description: '原作者已启用工作表保护。锁定单元格的编辑会受到限制，未锁定的单元格仍可能可编辑。此设置不是打开文件所需的加密密码。',
+    evidence: 'sheetProtection 的 sheet 已开启。', recommendation: '请在目标 Excel 中核对需要填写的区域；需要更改保护范围时，联系原作者。',
+  });
   const groups = new Map();
   const mark = (code, ref, extra = '') => {
-    const group = groups.get(code) ?? { refs: [], extras: new Set() };
-    group.refs.push(ref);
-    if (extra) group.extras.add(extra);
+    const group = groups.get(code) ?? { count: 0, refs: [], extras: new Set() };
+    group.count++;
+    if (group.refs.length < 12) group.refs.push(ref);
+    if (extra && group.extras.size < 12) group.extras.add(compact(extra, 160));
     groups.set(code, group);
   };
-  const columns = elements(doc, NS.s, 'col').map(node => ({ min: Number(attribute(node, 'min')), max: Number(attribute(node, 'max')), width: Number(attribute(node, 'width')), hidden: isTrue(attribute(node, 'hidden')) }));
+  const columns = elements(doc, NS.s, 'col').map(node => ({ min: Number(attribute(node, 'min')), max: Number(attribute(node, 'max')), width: Number(attribute(node, 'width')), hidden: isTrue(attribute(node, 'hidden')), style: attribute(node, 'style', '0') }));
   const defaultWidth = Number(attribute(elements(doc, NS.s, 'sheetFormatPr')[0], 'defaultColWidth', '8.43')) || 8.43;
   const merges = mergedRanges(doc);
   const layoutBudget = cells.length * (columns.length + merges.length);
   const layoutLimited = layoutBudget > 2_000_000;
+  let protectColumnStyles = false;
+  const rememberStyle = styleIndex => {
+    const xf = styles.xfs[Number(styleIndex)];
+    const base = styles.baseXfs[Number(attribute(xf, 'xfId', '0'))];
+    const family = styles.fontNames[Number(attribute(xf, 'fontId', attribute(base, 'fontId', '0')))];
+    if (family) privateStyleFonts.add(family);
+    if (base && ['0', 'false'].includes(attribute(xf, 'applyFont'))) {
+      const inherited = styles.fontNames[Number(attribute(base, 'fontId', '0'))];
+      if (inherited) privateStyleFonts.add(inherited);
+    }
+  };
   const occupied = new Set(cells.filter(cell => first(cell, NS.s, 'f') || first(cell, NS.s, 'v') || first(cell, NS.s, 'is')).map(cell => {
     const pos = cellPosition(attribute(cell, 'r'));
     return pos ? `${pos.row}:${pos.col}` : '';
@@ -310,25 +367,46 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory) {
   for (const cell of cells) {
     const ref = attribute(cell, 'r', '?');
     const formula = first(cell, NS.s, 'f');
+    const value = first(cell, NS.s, 'v');
+    const raw = value?.textContent?.trim() ?? '';
+    const type = attribute(cell, 't');
     if (formula) {
       sheet.formulaCount += 1;
       const features = formulaFeatures(formula.textContent ?? '');
       if (features.recent.length) mark('FORMULA_VERSION_REQUIREMENT', ref, features.recent.join('、'));
       if (features.dependent.length) mark('FORMULA_ENVIRONMENT_DEPENDENCY', ref, features.dependent.join('、'));
       if (features.external) mark('EXTERNAL_WORKBOOK_FORMULA', ref);
+      if (features.localLink) mark('FORMULA_FILE_HYPERLINK', ref);
+      // Empty string results are valid. Lack of a numeric/boolean/error
+      // cache is common in generated files; it does not invalidate a formula.
+      const hasCachedValue = value ? !!raw || type === 'str' || type === 'inlineStr'
+        : type === 'inlineStr' && first(cell, NS.s, 'is');
+      if (!hasCachedValue) mark('FORMULA_CACHE_MISSING', ref);
+      else if (type === 'e' && raw) mark('FORMULA_CACHE_ERROR', ref, compact(raw, 40));
     }
-    const raw = first(cell, NS.s, 'v')?.textContent?.trim() ?? '';
-    const type = attribute(cell, 't');
-    if ((!type || type === 'n') && raw) {
+    // A formula result is not a source identifier. Do not tell users to
+    // re-import their formulas as text based on last-calculated values.
+    if (!formula && (!type || type === 'n') && raw) {
       if (numericPrecisionRisk(raw)) mark('NUMERIC_PRECISION_RISK', ref);
       if (/^[+-]?0\d+/.test(raw)) mark('NUMERIC_LEADING_ZEROS', ref);
     }
     const text = textValue(cell, strings);
+    if (text && PRIVATE_USE.test(text)) {
+      mark('PRIVATE_USE_TEXT', ref);
+      if (cell.hasAttribute('s')) rememberStyle(attribute(cell, 's'));
+      else if (cell.parentNode?.localName === 'row' && cell.parentNode.hasAttribute('s')
+        && isTrue(attribute(cell.parentNode, 'customFormat'))) rememberStyle(attribute(cell.parentNode, 's'));
+      else if (layoutLimited) protectColumnStyles = true;
+      else {
+        const idx = columnIndex(ref);
+        rememberStyle(columns.find(col => idx >= col.min && idx <= col.max)?.style ?? '0');
+      }
+    }
     if (text?.includes('\uFFFD')) mark('TEXT_REPLACEMENT_CHARACTER', ref);
     if (text !== null && !formula && /^\d+$/.test(text) && (/^0\d/.test(text) || text.length > 15)) mark('TEXT_IDENTIFIER_PRESERVED', ref);
     const { alignment, xf, fontSize } = effectiveAlignment(cell, styles);
     const format = styles.numberFormats.get(attribute(xf, 'numFmtId')) ?? '';
-    if ((!type || type === 'n') && /^0{2,}$/.test(format.split(';')[0])) mark('ZERO_PADDED_DISPLAY', ref);
+    if ((!type || type === 'n') && usesZeroPadding(raw, format)) mark('ZERO_PADDED_DISPLAY', ref);
 
     // A deliberately conservative hint, not a renderer or an autofit operation.
     if (layoutLimited || text === null || !text || formula || isTrue(attribute(alignment, 'shrinkToFit')) || Number(attribute(alignment, 'textRotation', '0')) !== 0) continue;
@@ -346,6 +424,13 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory) {
       if (Number.isFinite(height) && lines * fontSize * 1.2 > height * 1.2) mark('WRAPPED_TEXT_HEIGHT_HEURISTIC', ref);
     }
   }
+  if (protectColumnStyles) {
+    // Don't multiply thousands of columns by thousands of private-use cells.
+    // When resolving those intersections is too costly, protect all candidate
+    // column/default families used on this sheet.
+    rememberStyle('0');
+    for (const col of columns) rememberStyle(col.style);
+  }
   inventory.formulaCount += sheet.formulaCount;
   inventory.worksheets.push(sheet);
   if (layoutLimited) add('LAYOUT_HEURISTIC_LIMIT', part, {
@@ -358,17 +443,23 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory) {
     FORMULA_VERSION_REQUIREMENT: ['warning', '公式需要核对目标软件版本', '发现未来函数标记或较新的函数；这是版本依赖提示，不代表公式损坏或 Windows 不支持。当前 Excel、旧版 Excel、WPS 等支持范围可能不同。', '在接收方实际使用的软件版本中重算并核对结果，保留原公式。'],
     FORMULA_ENVIRONMENT_DEPENDENCY: ['warning', '公式依赖在线服务、数据源或加载项', '部分公式可能需要网络、许可、数据源或本机加载项。移动文件本身不会携带所有运行条件。', '在目标电脑配置所需的数据源、许可或加载项，并核对刷新后的结果。'],
     EXTERNAL_WORKBOOK_FORMULA: ['warning', '公式引用外部工作簿', '公式依赖另一个工作簿。换电脑后，路径、访问权限或源文件可能不同；缓存结果不保证仍然最新。', '一同提供所需源文件，在目标 Excel 中检查链接并重新计算。'],
+    FORMULA_FILE_HYPERLINK: ['warning', '公式中的附件或本机链接可能打不开', 'HYPERLINK 公式写入了固定文件路径或本机服务地址。工作簿不会随附链接指向的文件；点击链接是否可用，取决于接收方的目录、权限或服务。', '一同发送附件并保留相对目录，或在原始 Excel 中更新链接，再到目标电脑打开确认。工具不访问链接、不改写公式。'],
+    FORMULA_CACHE_MISSING: ['info', '部分公式没有保存上次计算结果', '公式仍在文件中。只能预览而不能计算公式的软件，可能显示空白或不同的占位值；缺少缓存不能证明公式损坏。', '在可信的原工作簿中重新计算、保存后再发送。如果接收方需要继续编辑，保留公式，不要粘贴为数值。'],
+    FORMULA_CACHE_ERROR: ['warning', '部分公式上次保存的结果是错误值', '文件中保存了公式的错误结果。它可能来自当时的数据、依赖或软件版本，也可能是公式有意返回的值；当前工具没有执行公式。', '对照原工作簿，在接收方 Excel 中核对输入、函数和外部依赖后重新计算。'],
     NUMERIC_PRECISION_RISK: ['warning', '长数值需要核对精度', '这些单元格以数值保存，长度或有效数字超过 Excel 的 15 位精度范围。不能仅凭当前文件判断是否已经丢失数字，也不能恢复未知原值。', '如果它们是编号，请与原始数据核对，并在原应用中以文本重新导入；若用于计算，请核对所需精度。'],
     NUMERIC_LEADING_ZEROS: ['warning', '数值存储中出现前导零', 'XML 中带前导零的内容被标记为数值。目标软件可能按数值显示，不能假定这些零属于可丢弃格式或必须保留的编号。', '对照原始数据确认含义；本工具不会猜测并改写数据类型或补零。'],
     TEXT_IDENTIFIER_PRESERVED: ['info', '部分长编号或前导零已以文本保存', '这些内容当前以文本保存，前导零或长数字可保留。此项是保护提示，不是兼容性错误。', '保持文本类型，避免另存 CSV 后直接按数值重新导入。'],
     TEXT_REPLACEMENT_CHARACTER: ['warning', '文字中出现 Unicode 替换字符', '这些单元格保存了替换字符（�）。这可能来自较早的编码转换，也可能是有意输入；单凭当前文件不能确定或还原原字。', '与原始文稿核对；如属乱码，从原应用重新导出或从正确编码的数据源重新导入。'],
+    PRIVATE_USE_TEXT: ['warning', '部分文字使用字体专用的字符', '这些单元格包含 Unicode 私用区字符。它们可能是图标、徽标或自定义字，换一套字体可能显示成方框或不同的图形。', '请在目标电脑安装获得授权的原字体，并逐个核对这些单元格。工具保留字符本身，不猜测它们代表的文字。'],
     ZERO_PADDED_DISPLAY: ['info', '部分前导零来自数字显示格式', '这些单元格用补零格式显示数值，前导零不是底层数值的一部分。XLSX 会保留格式，但复制到其他软件或导出纯文本时需核对。', '保留当前数字格式；如需作为外部编号使用，先核对导出的实际文本。'],
     TEXT_CLIPPING_HEURISTIC: ['info', '部分文字可能被相邻单元格挡住（估算）', '根据文本长度、列宽及相邻内容估计，部分未换行文字可能显示不全。此检查没有进行字体排版，也不能证明存在截断。', '在目标 Excel 中检查这些单元格，再决定是否调整列宽或换行；本工具不会自动改变布局。'],
     WRAPPED_TEXT_HEIGHT_HEURISTIC: ['info', '固定行高可能容纳不了换行文字（估算）', '这些单元格设置了换行且行高固定。估算的行数可能超出可见高度；实际显示取决于字体和渲染环境。', '在目标 Excel 中检查这些单元格，必要时手动调整行高。'],
   };
   for (const [code, group] of groups) {
     const [severity, title, description, recommendation] = definitions[code];
-    add(code, part, { severity, title, description, recommendation, location: `${name} · ${sample(group.refs)}`, evidence: `${group.refs.length} 个单元格：${sample(group.refs)}。${group.extras.size ? `函数：${compact([...group.extras].join('；'), 500)}。` : ''}` });
+    const detail = group.extras.size ? `${code === 'FORMULA_CACHE_ERROR' ? '保存的错误值' : '函数'}：${compact([...group.extras].join('；'), 500)}。` : '';
+    const refs = sample(group.refs, group.count);
+    add(code, part, { severity, title, description, recommendation, location: `${name} · ${refs}`, evidence: `${group.count} 个单元格：${refs}。${detail}` });
   }
   const pageSetup = elements(doc, NS.s, 'pageSetup')[0];
   const marginDefaults = [
@@ -479,24 +570,25 @@ function scanPackageFeatures(ctx, add, inventory) {
 
 /** Inspect SpreadsheetML without changing formulas, values, styles or dimensions. */
 export function scanXlsx(ctx) {
-  const issues = [];
+  const issues = [], fontIssues = [];
   const counters = new Map();
-  const add = (code, part, details) => {
+  const add = (code, part, details, list = issues) => {
     const key = `${code}:${part}`;
     const index = counters.get(key) ?? 0;
     counters.set(key, index + 1);
-    issues.push({ id: `${code}:${part}:${index}`, code, severity: 'info', part, location: part, fixable: false, defaultSelected: false, ...details });
+    list.push({ id: `${code}:${part}:${index}`, code, severity: 'info', part, location: part, fixable: false, defaultSelected: false, ...details });
   };
   const inventory = { worksheets: [], formulaCount: 0, fonts: [], chartCount: 0, externalLinks: 0, connectionCount: 0, embeddedObjects: 0, dateSystem: '1900', hasPrintSettings: false };
-  scanFonts(ctx, add, inventory);
+  const privateStyleFonts = new Set();
   scanWorkbook(ctx, add, inventory);
   const styles = readStyles(ctx.xml);
   const strings = elements(ctx.xml.get('xl/sharedStrings.xml'), NS.s, 'si').map(richText);
   const names = worksheetNames(ctx.xml);
   for (const [part, doc] of ctx.xml) if (/^xl\/worksheets\/[^/]+\.xml$/i.test(part)) {
-    scanSheet(ctx, part, doc, names.get(part) ?? part.split('/').at(-1), styles, strings, add, inventory);
+    scanSheet(ctx, part, doc, names.get(part) ?? part.split('/').at(-1), styles, strings, add, inventory, privateStyleFonts);
   }
+  scanFonts(ctx, (code, part, details) => add(code, part, details, fontIssues), inventory, privateStyleFonts);
   scanPackageFeatures(ctx, add, inventory);
   scanOtherFormulas(ctx, add);
-  return { issues, inventory };
+  return { issues: [...fontIssues, ...issues], inventory };
 }
