@@ -465,6 +465,34 @@ try {
     await sheet.close();
   });
 
+  await test('浏览器拒绝读取或提供空名单时，保留当前核对并提示导入 TXT', async () => {
+    // Edge can resolve to an empty array on denial. Other browsers reject.
+    // Simulate both responses here; real OS enumeration is a separate VM test.
+    const denied = await context.newPage();
+    await denied.addInitScript(() => {
+      Object.defineProperty(navigator, 'userAgent', { get: () => 'Windows test browser' });
+      let calls = 0;
+      Object.defineProperty(window, 'queryLocalFonts', { value: async () => {
+        if (++calls === 1) return [];
+        throw new DOMException('Permission denied', 'NotAllowedError');
+      } });
+    });
+    await denied.goto(baseUrl);
+    await denied.locator('#demo-xlsx').click();
+    await denied.locator('#font-settings > summary').click();
+    await denied.locator('#font-list-input').setInputFiles({
+      name: 'known.txt', mimeType: 'text/plain', buffer: Buffer.from('Arial'),
+    });
+    await denied.locator('#font-comparison').waitFor();
+    for (const expected of ['没有提供可读取的字体', '未提供本机字体']) {
+      await denied.locator('#read-local-fonts').click();
+      await denied.waitForFunction(msg => document.querySelector('.font-settings-error')?.textContent.includes(msg), expected);
+      assert.match(await denied.locator('.font-settings-error').innerText(), /导入字体名单/);
+      assert.match(await denied.locator('#font-comparison').innerText(), /已核对 1 个/);
+    }
+    await denied.close();
+  });
+
   await test('检查及修复过程没有文档上传或第三方请求', async () => {
     const base = new URL(baseUrl);
     const localReports = new Set(['report.html', 'long-path-report.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));

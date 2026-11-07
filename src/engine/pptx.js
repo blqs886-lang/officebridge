@@ -1,4 +1,5 @@
 import { NS, attribute, fontAttribute } from './xml.js';
+import { encodingExample, encodingFinding } from './text-encoding.js';
 import { fontAdvice, isKnownFont, isProtectedFont } from './fonts.js';
 
 const DRAWING_NS = new Set([NS.a, 'http://purl.oclc.org/ooxml/drawingml/main']);
@@ -169,6 +170,19 @@ function mediaKind(part, contentType) {
   if (AUDIO_EXTENSIONS.has(extension(part))) return 'audio';
   if (VIDEO_EXTENSIONS.has(extension(part))) return 'video';
   return 'image-or-other';
+}
+
+function transitionSettings(node) {
+  const settings = [];
+  if (children(node).length) settings.push('切换效果、声音或扩展元素');
+  if (node.hasAttribute('advTm')) settings.push('定时换页');
+  const click = attribute(node, 'advClick', 'true').trim();
+  if (['0', 'false'].includes(click)) settings.push('禁用单击换页');
+  const otherAttribute = Array.from(node.attributes).some(a =>
+    a.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && (a.namespaceURI || !['spd', 'advClick', 'advTm'].includes(a.name)));
+  if (otherAttribute || !['0', '1', 'false', 'true'].includes(click)) settings.push('其他切换设置');
+  // Speed alone supplies no effect. Advancing with a click is the default.
+  return settings;
 }
 
 function externalKind(type) {
@@ -415,6 +429,13 @@ export function scanPptx(context) {
 
     const texts = nodes.filter(node => isDrawing(node, 't') || isDrawing(node, 'buChar'))
       .map(node => node.localName === 'buChar' ? attribute(node, 'char') : node.textContent || '');
+    for (const text of texts) {
+      const example = encodingExample(text);
+      if (example) {
+        addIssue('PPTX_TEXT_ENCODING_REVIEW', part, { ...encodingFinding, evidence: `${example.stored} → ${example.preview}` });
+        break;
+      }
+    }
     if (texts.some(text => PRIVATE_USE.test(text))) {
       addIssue('PPTX_PRIVATE_USE_GLYPHS', part, {
         severity: 'warning', title: '存在依赖特定字体的私用区字符',
@@ -451,13 +472,17 @@ export function scanPptx(context) {
     }
 
     const animationCount = nodes.filter(node => isPresentation(node) && ANIMATION_ELEMENTS.has(node.localName)).length;
-    const transitions = nodes.filter(node => isPresentation(node, 'transition'));
+    const transitions = nodes.filter(node => isPresentation(node, 'transition')).map(transitionSettings).filter(settings => settings.length);
     if (animationCount || transitions.length) {
-      inventory.animations.push({ part, animationNodes: animationCount, transitions: transitions.length });
+      const settings = [...new Set(transitions.flat())];
+      const inherited = /^ppt\/slide(?:Masters|Layouts)\//.test(part);
+      inventory.animations.push({ part, animationNodes: animationCount, transitions: transitions.length, settings });
       addIssue('PPTX_ANIMATION_REVIEW', part, {
-        title: '包含需要实际播放核对的动画或切换',
-        description: '检测到动画行为或页面切换；检测其存在不意味着不兼容。时序、触发器和视觉效果需要在目标软件中播放验证。',
-        evidence: `${animationCount} 个动画行为节点；${transitions.length} 个切换定义（节点数不等于界面中的动画条目数）`,
+        title: inherited ? '母版或版式定义了动画或换页设置' : '包含需要实际播放核对的动画或换页设置',
+        description: inherited
+          ? '此设置定义在母版或版式中。具体页面是否继承它取决于版式及页面自己的设置。'
+          : '请在目标软件中放映，核对动画行为、换页方式或切换效果。',
+        evidence: `${animationCount} 个动画行为节点；${transitions.length} 个切换设置${settings.length ? `（${settings.join('、')}）` : ''}`,
         recommendation: '在目标电脑中放映，核对顺序、触发器与切换效果。工具保留所有动画定义。',
       });
     }

@@ -1,4 +1,5 @@
 import { NS, elements, attribute, fontAttribute } from './xml.js';
+import { encodingExample, encodingFinding } from './text-encoding.js';
 import { fontAdvice, isKnownFont, isProtectedFont } from './fonts.js';
 import { formulaTokens } from './xlsx-formula.js';
 
@@ -402,6 +403,8 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
         rememberStyle(columns.find(col => idx >= col.min && idx <= col.max)?.style ?? '0');
       }
     }
+    const encoding = encodingExample(text);
+    if (encoding) mark('TEXT_ENCODING_REVIEW', ref, `${encoding.stored} → ${encoding.preview}`);
     if (text?.includes('\uFFFD')) mark('TEXT_REPLACEMENT_CHARACTER', ref);
     if (text !== null && !formula && /^\d+$/.test(text) && (/^0\d/.test(text) || text.length > 15)) mark('TEXT_IDENTIFIER_PRESERVED', ref);
     const { alignment, xf, fontSize } = effectiveAlignment(cell, styles);
@@ -449,6 +452,7 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
     NUMERIC_PRECISION_RISK: ['warning', '长数值需要核对精度', '这些单元格以数值保存，长度或有效数字超过 Excel 的 15 位精度范围。不能仅凭当前文件判断是否已经丢失数字，也不能恢复未知原值。', '如果它们是编号，请与原始数据核对，并在原应用中以文本重新导入；若用于计算，请核对所需精度。'],
     NUMERIC_LEADING_ZEROS: ['warning', '数值存储中出现前导零', 'XML 中带前导零的内容被标记为数值。目标软件可能按数值显示，不能假定这些零属于可丢弃格式或必须保留的编号。', '对照原始数据确认含义；本工具不会猜测并改写数据类型或补零。'],
     TEXT_IDENTIFIER_PRESERVED: ['info', '部分长编号或前导零已以文本保存', '这些内容当前以文本保存，前导零或长数字可保留。此项是保护提示，不是兼容性错误。', '保持文本类型，避免另存 CSV 后直接按数值重新导入。'],
+    TEXT_ENCODING_REVIEW: [encodingFinding.severity, encodingFinding.title, encodingFinding.description, encodingFinding.recommendation],
     TEXT_REPLACEMENT_CHARACTER: ['warning', '文字中出现 Unicode 替换字符', '这些单元格保存了替换字符（�）。这可能来自较早的编码转换，也可能是有意输入；单凭当前文件不能确定或还原原字。', '与原始文稿核对；如属乱码，从原应用重新导出或从正确编码的数据源重新导入。'],
     PRIVATE_USE_TEXT: ['warning', '部分文字使用字体专用的字符', '这些单元格包含 Unicode 私用区字符。它们可能是图标、徽标或自定义字，换一套字体可能显示成方框或不同的图形。', '请在目标电脑安装获得授权的原字体，并逐个核对这些单元格。工具保留字符本身，不猜测它们代表的文字。'],
     ZERO_PADDED_DISPLAY: ['info', '部分前导零来自数字显示格式', '这些单元格用补零格式显示数值，前导零不是底层数值的一部分。XLSX 会保留格式，但复制到其他软件或导出纯文本时需核对。', '保留当前数字格式；如需作为外部编号使用，先核对导出的实际文本。'],

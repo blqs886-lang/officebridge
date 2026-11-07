@@ -178,7 +178,28 @@ test('animation and advanced-graphics findings describe review needs, not confir
   assert.equal(result.inventory.animations[0].animationNodes, 1);
   assert.equal(result.inventory.animations[0].transitions, 1);
   assert.equal(result.issues.find(issue => issue.code === 'PPTX_ADVANCED_GRAPHICS').severity, 'info');
-  assert.match(result.issues.find(issue => issue.code === 'PPTX_ANIMATION_REVIEW').description, /不意味着不兼容/);
+  assert.match(result.issues.find(issue => issue.code === 'PPTX_ANIMATION_REVIEW').description, /目标软件中放映/);
+});
+
+test('default click-to-advance declarations do not create animation findings in Keynote slide, layout and master records', () => {
+  const ordinary = '<p:transition spd="med" advClick="1"/>';
+  const parts = {
+    'ppt/slides/slide1.xml': slide(ordinary),
+    'ppt/slideMasters/slideMaster1.xml': `<p:sldMaster ${namespaces}>${ordinary}</p:sldMaster>`,
+    'ppt/slideLayouts/slideLayout1.xml': `<p:sldLayout ${namespaces}><p:transition spd="fast" advClick="true"/></p:sldLayout>`,
+    'ppt/slides/slide2.xml': slide('<p:transition/>'),
+    'ppt/slides/slide3.xml': slide('<p:transition advTm="0" advClick="0"/>'),
+    'ppt/slides/slide4.xml': slide('<p:transition><p:sndAc><p:endSnd/></p:sndAc></p:transition>'),
+    'ppt/slides/slide5.xml': slide('<p:transition xmlns:v="urn:example:transition" v:duration="500"/>'),
+    'ppt/slideLayouts/slideLayout2.xml': `<p:sldLayout ${namespaces}><p:transition><p:fade/></p:transition></p:sldLayout>`,
+  };
+  const scan = scanPptx(context(parts));
+  const findings = scan.issues.filter(i => i.code === 'PPTX_ANIMATION_REVIEW');
+  assert.equal(findings.length, 4);
+  assert.match(findings.find(i => i.part.endsWith('slide3.xml')).evidence, /定时换页、禁用单击换页/);
+  assert.match(findings.find(i => i.part.endsWith('slide4.xml')).evidence, /声音/);
+  assert.match(findings.find(i => i.part.endsWith('slide5.xml')).evidence, /其他切换设置/);
+  assert.match(findings.find(i => i.part.endsWith('slideLayout2.xml')).description, /是否继承/);
 });
 
 test('3D definitions in an unused theme style library do not assert visible 3D effects', () => {
