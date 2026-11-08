@@ -39,14 +39,16 @@ jobs:
         run: npm run build
       - name: Build portable application
         run: npm run build:portable
-      - name: Exercise the offline app in Chrome
-        if: runner.os == 'macOS'
+      - name: Exercise the offline app in the desktop browser
+        if: runner.os == 'macOS' || runner.os == 'Windows'
         shell: bash
+        env:
+          BROWSER_CHANNEL: ${{ runner.os == 'Windows' && 'msedge' || 'chrome' }}
         run: |
           npm install --prefix "$RUNNER_TEMP/browser-check" --no-save --ignore-scripts --no-audit --no-fund playwright-core@1.62.1
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/browser-check/node_modules/playwright-core/index.mjs" \
           APP_URL="$(node -p "require('node:url').pathToFileURL(require('node:path').resolve('release/OfficeBridge.html')).href")" \
-          BROWSER_CHANNEL=chrome npm run test:browser
+          npm run test:browser
       - name: Install independent office reader and PDF tools
         if: runner.os == 'Linux'
         run: |
