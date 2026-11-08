@@ -35,7 +35,7 @@ Keynote 或 Numbers 文件请先在原应用中导出为 PowerPoint 或 Excel，
 
 ### 怎样理解验证状态
 
-- 0.3.0 离线 HTML 通过 Mac Chrome 的 24 组流程、Windows 11 虚拟机 Edge 的 49 项检查，涵盖真实 Keynote / Numbers 导出文件及可编辑副本下载。
+- 0.3.0 的离线操作在 Mac Chrome 和 Windows Edge 中各通过 24 组回归。发布候选版还在 Windows 11 虚拟机里通过 49 项专项核对，涵盖真实 Keynote、Numbers 导出文件和可编辑副本下载。
 - 本版在 Mac 上通过 146 项自动测试。LibreOffice 另行打开原件和修复副本，检查图表、公式结果、文本编号和渲染页。具体环境见 [测试记录](docs/TESTING.md)。
 - 在 Windows 11 桌面 PowerPoint 和 Excel 中，已对选定样本核对 Mac 原件、Windows 原件和修复副本。等宽数字列重新对齐，部分长表仍会改变分页。已实播点击动画，并验证公式编辑、保存、重新打开。每份新文件仍需独立核对，浏览器结构检查保留 `windowsOfficeTested: false`。[测试范围](docs/TESTING.md)
 - 可选的 Windows PowerShell 验证脚本需要目标电脑上已安装的桌面 Office；它仍属于实验功能，打开成功也不代表版面一致或公式正确。
