@@ -6,7 +6,7 @@ import { normalizeFontOptions } from './fonts.js';
 
 import { compareFontList } from './target-fonts.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 const mainTypes = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml',
@@ -207,7 +207,7 @@ export async function repairOffice(bytes, fileName, options = {}) {
   for (const id of selected) {
     const issue = beforeReport.issues.find(i => i.id === id);
     if (!issue?.fixable || issue.fix?.kind !== 'font-replace') throw new Error('选择的修复项目已失效或不支持，请重新检查文件。');
-    fixes.push({ ...issue.fix, issueId: issue.id, part: issue.part });
+    fixes.push({ ...issue.fix, issueId: issue.id, part: issue.part, printReview: issue.fix.affectsDefaultFont || issue.fix.affectsWrappedRows ? issue.description + ' ' + issue.recommendation : undefined });
   }
   const entries = new Map(ctx.entries), changes = [];
   for (const part of new Set(fixes.map(f => f.part))) {
@@ -217,7 +217,9 @@ export async function repairOffice(bytes, fileName, options = {}) {
     for (const fix of partFixes) {
       const count = counts.get(fix.issueId) || 0;
       if (!count) throw new Error(`未定位到 ${part} 的目标字体；为保护内容，未生成修复副本。`);
-      changes.push({ issueId: fix.issueId, part, kind: fix.kind, before: fix.from, after: fix.to, count });
+      const change = { issueId: fix.issueId, part, kind: fix.kind, before: fix.from, after: fix.to, count };
+      if (fix.printReview) change.printReview = fix.printReview;
+      changes.push(change);
     }
     entries.set(part, encodeXml(text, ctx.encodings.get(part)));
   }

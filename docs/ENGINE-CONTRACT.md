@@ -10,10 +10,10 @@ Report fields: `schemaVersion: 1`, `toolVersion`, `fileName`, `format: 'pptx'|'x
 
 Issue: `{ id, code, severity: 'warning'|'info'|'error', title, description,
 location: string, part: string, fixable: boolean, defaultSelected: boolean,
-fix?: { kind: 'font-replace', from: string, to: string, scope: string },
+fix?: { kind: 'font-replace', from: string, to: string, scope: string, affectsDefaultFont?: true, affectsWrappedRows?: true },
 evidence?: string, recommendation?: string }`.
 
-Change: `{ issueId, part, kind, before, after, count }`.
+Change: `{ issueId, part, kind, before, after, count, printReview?: string }`. XLSX changes that touch the default font or text in wrapped, automatically sized rows carry their print-preview guidance into the post-repair report.
 
 Format scanner exports `scanPptx(context)` / `scanXlsx(context)` returning
 `{ issues, inventory }`. Context is `{ entries: Map<string, Uint8Array>,

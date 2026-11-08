@@ -6,6 +6,7 @@ import { NS, parseXml, escapeAttribute } from '../src/engine/xml.js';
 import { createDemo } from '../src/engine/demo.js';
 import { readArchive, writeArchive } from '../src/engine/archive.js';
 import { analyzeOffice, repairOffice } from '../src/engine/index.js';
+import { buildHtmlReport } from '../src/ui/reports.js';
 
 const S = NS.s;
 const A = NS.a;
@@ -21,6 +22,81 @@ function context(parts, options = {}) {
 function inspect(parts, options) { return scanXlsx(context(parts, options)); }
 function codes(report) { return report.issues.map(issue => issue.code); }
 function issue(report, code) { return report.issues.find(item => item.code === code); }
+
+test('default-font pagination follows the localized built-in Normal style, including its active theme, with no extra print finding', () => {
+  const theme = `<a:theme xmlns:a="${A}"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Menlo"/></a:majorFont><a:minorFont><a:latin typeface="Helvetica Neue"/><a:font script="Hans" typeface="PingFang SC"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`;
+  const report = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Menlo"/></font><font><name val="PingFang SC"/><scheme val="minor"/></font></fonts><cellStyleXfs><xf fontId="0"/><xf fontId="1"/></cellStyleXfs><cellXfs><xf fontId="0"/></cellXfs><cellStyles><cellStyle name="Normal" xfId="0" builtinId="1"/><cellStyle name="常规" xfId="1" builtinId="0"/></cellStyles>'),
+    'xl/_rels/workbook.xml.rels': `<Relationships xmlns="${NS.rel}"><Relationship Id="rId2" Type="${NS.r}/theme" Target="theme/current.xml"/></Relationships>`,
+    'xl/theme/unused.xml': theme, 'xl/theme/current.xml': theme,
+    'xl/sharedStrings.xml': `<sst xmlns="${S}"><si><r><rPr><rFont val="PingFang SC"/></rPr><t>文字</t></r></si></sst>`,
+    'xl/worksheets/sheet1.xml': sheet('<sheetData/>'),
+  });
+  const flagged = report.issues.filter(item => item.fix?.affectsDefaultFont);
+  assert.deepEqual(flagged.map(item => [item.part, item.fix.from]), [['xl/styles.xml', 'PingFang SC'], ['xl/theme/current.xml', 'Helvetica Neue']]);
+  assert.ok(flagged.every(item => !item.defaultSelected && /默认字体/.test(item.description) && /列宽、自动行高/.test(item.description) && /保留原字体/.test(item.recommendation) && /每页首行和末行/.test(item.recommendation)));
+  assert.ok(!issue(report, 'PRINT_LAYOUT_REVIEW'));
+});
+
+test('without a built-in Normal declaration use the default cell XF with its font inheritance', () => {
+  const fonts = '<fonts><font><name val="Helvetica"/></font><font><name val="Menlo"/></font></fonts>';
+  const lookup = (xf, other = '') => inspect({ 'xl/styles.xml': styles(fonts + '<cellStyleXfs><xf fontId="0"/><xf fontId="1"/></cellStyleXfs><cellXfs>' + xf + '</cellXfs>' + other) })
+    .issues.filter(item => item.fix?.affectsDefaultFont).map(item => item.fix.from);
+  assert.deepEqual(lookup('<xf fontId="0" xfId="1"/>'), ['Helvetica']);
+  assert.deepEqual(lookup('<xf fontId="0" xfId="1" applyFont="false"/>'), ['Menlo']);
+  assert.deepEqual(lookup('<xf xfId="1"/>'), ['Menlo']);
+  assert.deepEqual(lookup('<xf fontId="17"/>'), []);
+  assert.deepEqual(lookup('<xf fontId="1"/>', '<cellStyles><cellStyle builtinId="0" xfId="9"/></cellStyles>'), []);
+  assert.deepEqual(lookup(''), []);
+});
+
+test('auto-height print review follows only fonts used by visible wrapped text, including rich runs and inherited styles', () => {
+  const faces = ['Arial', 'PingFang SC', 'Helvetica', 'Menlo', 'Monaco'];
+  const fonts = faces.map(name => `<font><name val="${name}"/></font>`).join('');
+  const wrap = '<alignment wrapText="1"/>';
+  const run = face => `<r><rPr><rFont val="${face}"/></rPr><t>多行文字</t></r>`;
+  const report = inspect({
+    'xl/styles.xml': styles(`<fonts>${fonts}</fonts><cellStyleXfs><xf fontId="0"/><xf fontId="1">${wrap}</xf></cellStyleXfs><cellXfs><xf fontId="0"/><xf xfId="1" fontId="4" applyFont="0" applyAlignment="0"/><xf fontId="2">${wrap}</xf><xf fontId="3"/><xf fontId="4">${wrap}</xf></cellXfs>`),
+    'xl/sharedStrings.xml': `<sst xmlns="${S}"><si>${run('Menlo')}</si><si>${run('Monaco')}</si></sst>`,
+    'xl/worksheets/sheet1.xml': sheet('<cols><col min="2" max="2" style="1"/><col min="4" max="4" hidden="1"/></cols><sheetData>' +
+      '<row r="1">' + inline('A1', '普通文字', 's="3"') + inline('B1', '继承列样式') + '<c r="C1" s="4" t="s"><v>0</v></c>' + inline('D1', '隐藏列', 's="4"') + '</row>' +
+      '<row r="2" customHeight="1" ht="30">' + inline('A2', '固定高度', 's="4"') + '</row>' +
+      '<row r="3" hidden="1">' + inline('A3', '隐藏行', 's="4"') + '</row>' +
+      '<row r="4" customFormat="1" s="2">' + inline('A4', '继承行样式') + '</row>' +
+      '<row r="5">' + inline('A5', '合并单元格', 's="4"') + '</row>' +
+      '<row r="6"><c r="A6" s="4" t="inlineStr"><is>' + run('Helvetica Neue') + '</is></c></row>' +
+      '</sheetData><mergeCells><mergeCell ref="A5:B5"/></mergeCells>'),
+  });
+  const affected = report.issues.filter(item => item.fix?.affectsWrappedRows);
+  assert.deepEqual(affected.map(item => [item.part, item.fix.from]), [
+    ['xl/styles.xml', 'PingFang SC'], ['xl/styles.xml', 'Helvetica'],
+    ['xl/sharedStrings.xml', 'Menlo'], ['xl/worksheets/sheet1.xml', 'Helvetica Neue'],
+  ]);
+  assert.ok(affected.every(item => !item.defaultSelected && !item.fix.affectsDefaultFont));
+  assert.match(affected[0].evidence, /B1/);
+  assert.match(affected[1].evidence, /A4/);
+  assert.match(affected[2].evidence, /C1/);
+  assert.match(affected[3].evidence, /A6/);
+  assert.ok(affected.every(item => /自动行高/.test(item.description) && /打印预览/.test(item.recommendation)));
+});
+
+test('exported repair reports carry the print check only on a selected default font change', async () => {
+  const entries = readArchive(createDemo('xlsx')).entries;
+  const text = new TextDecoder().decode(entries.get('xl/styles.xml')).replace(/(<cellStyleXfs[^>]*>\s*<xf[^>]*?fontId=")0"/, (_, prefix) => prefix + '2"');
+  entries.set('xl/styles.xml', new TextEncoder().encode(text));
+  const bytes = writeArchive(entries);
+  const report = await analyzeOffice(bytes, 'print.xlsx');
+  const normal = report.issues.find(item => item.fix?.affectsDefaultFont);
+  const other = report.issues.find(item => item.fixable && !item.fix.affectsDefaultFont);
+  assert.equal(normal.fix.from, 'PingFang SC');
+  const partial = await repairOffice(bytes, 'print.xlsx', { selectedIssueIds: [other.id] });
+  assert.ok(partial.changes.every(change => !change.printReview));
+  const repaired = await repairOffice(bytes, 'print.xlsx', { selectedIssueIds: [normal.id] });
+  assert.match(repaired.report.repair.changes[0].printReview, /打印预览.*总页数、每页首行和末行/);
+  const html = buildHtmlReport({ report, repaired });
+  assert.match(html.slice(html.indexOf('<h2>修复副本')), /工作簿默认字体.*每页首行和末行/);
+  assert.ok(!repaired.report.issues.some(item => item.fix?.affectsDefaultFont));
+});
 
 test('finds style, rich-text, theme and chart fonts with explicit opt-in repair', () => {
   const report = inspect({

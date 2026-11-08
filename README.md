@@ -1,23 +1,21 @@
 # OfficeBridge
 
-**在把 Mac 制作的文件交给 Windows 之前，检查可见的兼容风险，并按选择生成保留可编辑内容的字体替换副本。**
+把 Mac 上做好的演示文稿或表格交给 Windows 时，如果文字换行、数字对齐或打印分页变了，可以用 OfficeBridge 检查字体和其他兼容风险。它在你的电脑上运行，原件保留，生成的副本仍可用 PowerPoint 或 Excel 编辑。
 
-v0.2.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是规则检查与保守修改工具，不是 Office 排版引擎，也不能保证文件在另一台电脑上完全一致。源码采用 MIT 许可。
+**[下载 OfficeBridge，双击打开](https://github.com/blqs886-lang/officebridge/releases/latest/download/OfficeBridge.html)** · [完整便携包与源码](https://github.com/blqs886-lang/officebridge/releases/latest)
 
-## 直接使用
+![OfficeBridge 首页，选择文件或用表格样例开始](docs/images/start.png)
 
-从 [GitHub Releases](https://github.com/blqs886-lang/officebridge/releases) 下载名称含 **portable.zip** 的便携包，完整解压，用 Chrome 或 Windows Edge 打开其中的 `OfficeBridge.html`。这是包含所需代码和样例的单个 HTML 文件，无需安装 Node.js 或 Office，可断网使用。
+## 第一次用
 
-如果拿到的是源码 ZIP，解压后先按下方“开发与构建”生成这个文件；源码包不重复包含发布产物。便携 ZIP 则可直接解压并打开其中的 `OfficeBridge.html`。
+1. 下载上面的 `OfficeBridge.html`。在电脑的“下载”中找到它，用 Chrome 或 Windows Edge 打开。一个文件就能使用，也可以断网。
+2. 把演示文稿（`.pptx`）或表格（`.xlsx`）拖进去。手边没有文件，可以直接点内置示例。
+3. 看结果。如果原件在 Windows 上显示正常，可以直接使用原件。需要试换字体时，勾选对应的一项，点击 **“生成并下载副本”**。
+4. 在浏览器的下载列表中找到带 `.windows` 的文件。用 Windows Office 打开，对照原稿的换行、动画或打印分页。
 
-1. 先点“演示文稿”或“电子表格”，用合成样例熟悉报告。
-2. 选择或拖入自己的 `.pptx` / `.xlsx` 文件。
-3. 阅读风险说明、证据和建议。警告表示需要核对，不等于已经发生错误。
-4. 需要改字体时，再主动勾选具体建议；**默认全部不选**。展开“字体设置”，可以导入收件人 Windows 的字体名单。内置建议只提供名单上有的目标字体，已列入的原字体会保留。也可指定自定义替换。
-5. 下载检查报告；采用替换后，另行下载 `.windows.pptx` / `.windows.xlsx` 副本及变更报告。保留原件。
-6. 在接收方实际使用的 Windows 软件中打开，核对版面、文字、公式和播放效果。见 [完整使用指南与常见问题](docs/QUICKSTART.md) 和 [Windows 实际验证说明](docs/WINDOWS-VERIFICATION.md)。
+Keynote 或 Numbers 文件请先在原应用中导出为 PowerPoint 或 Excel，再把导出的文件放进来。需要精确匹配某台电脑的字体时，可在每份文件的字体设置里导入目标电脑的字体名单。[图文使用指南](docs/QUICKSTART.md) · [Windows 复核步骤](docs/WINDOWS-VERIFICATION.md)
 
-如报告发现疑似编码错读，可以在证据栏查看一小段可能的中文，与原始资料核对。工具保留文件中的文字。字体替换可能改变字宽、换行及外观；工具不会安装或嵌入字体，不证明字体授权，也不会猜测已经丢失的文字。
+如报告发现疑似编码错读，可以展开“查看全部检查结果”，在对应问题的“查看检查依据”中读一小段可能的中文，与原始资料核对。工具保留文件中的文字。字体替换可能改变字宽、换行及外观；工具不会安装或嵌入字体，不证明字体授权，也不会猜测已经丢失的文字。
 
 ## 支持范围
 
@@ -37,9 +35,9 @@ v0.2.0 支持 PPTX、XLSX，运行时在本机处理，不上传文档。它是�
 
 ### 怎样理解验证状态
 
-- 最终离线 HTML 通过 Mac Chrome 的 17 组流程、Windows 11 虚拟机 Edge 的 44 项专项检查，涵盖真实 Keynote / Numbers 导出文件及可编辑副本下载。
-- 本版在 Mac 上通过 139 项自动测试。LibreOffice 另行打开原件和修复副本，检查图表、公式结果、文本编号和渲染页。具体环境见 [测试记录](docs/TESTING.md)。
-- **尚未在真实 Windows 桌面 Office 中完成打开、编辑、版面或播放验证。** 报告中的 `windowsOfficeTested` 固定为 `false`。
+- 0.3.0 离线 HTML 通过 Mac Chrome 的 24 组流程、Windows 11 虚拟机 Edge 的 49 项检查，涵盖真实 Keynote / Numbers 导出文件及可编辑副本下载。
+- 本版在 Mac 上通过 146 项自动测试。LibreOffice 另行打开原件和修复副本，检查图表、公式结果、文本编号和渲染页。具体环境见 [测试记录](docs/TESTING.md)。
+- 在 Windows 11 桌面 PowerPoint 和 Excel 中，已对选定样本核对 Mac 原件、Windows 原件和修复副本。等宽数字列重新对齐，部分长表仍会改变分页。已实播点击动画，并验证公式编辑、保存、重新打开。每份新文件仍需独立核对，浏览器结构检查保留 `windowsOfficeTested: false`。[测试范围](docs/TESTING.md)
 - 可选的 Windows PowerShell 验证脚本需要目标电脑上已安装的桌面 Office；它仍属于实验功能，打开成功也不代表版面一致或公式正确。
 
 ## 处理上限与隐私

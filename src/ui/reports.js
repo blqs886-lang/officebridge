@@ -49,9 +49,18 @@ export function buildHtmlReport(record) {
   const report = payload.analysis;
   const esc = escapeHtml;
   const rows = (report.issues || []).map((issue) => `<tr><td><span class="badge ${['error', 'warning', 'info'].includes(issue.severity) ? issue.severity : 'info'}">${esc(severityLabels[issue.severity] || '提示')}</span></td><td><strong>${esc(issue.title)}</strong><p>${esc(issue.description)}</p>${issue.evidence ? `<p>证据：${esc(issue.evidence)}</p>` : ''}${issue.recommendation ? `<p>建议：${esc(issue.recommendation)}</p>` : ''}${issue.fix ? `<p>字体建议：${esc(issue.fix.from)} → ${esc(issue.fix.to)}（需自行确认）</p>` : ''}</td><td>${esc(issue.location || issue.part || '文件整体')}${issue.part ? `<code>${esc(issue.part)}</code>` : ''}</td></tr>`).join('');
-  const changes = (record.repaired?.changes || []).map((change) => `<tr><td>${esc(change.part)}</td><td>${esc(change.before)} → ${esc(change.after)}</td><td>${esc(change.count)}</td></tr>`).join('');
+  const changes = (record.repaired?.changes || []).map((change) => `<tr><td>${esc(change.part)}</td><td>${esc(change.before)} → ${esc(change.after)}${change.printReview ? `<p>打印复核 · ${esc(change.printReview)}</p>` : ''}</td><td>${esc(change.count)}</td></tr>`).join('');
   const repairedIssues = record.repaired?.report?.issues || [];
   const mappingRows = Object.entries(payload.analysisOptions.fontMappings).map(([from, to]) => `<tr><td>${esc(from)}</td><td>${esc(to)}</td></tr>`).join('');
+  const officeApp = report.format === 'xlsx' ? 'Excel' : 'PowerPoint';
+  const nextStep = record.repaired
+    ? `请在 Windows 的 ${officeApp} 中打开 <strong>${esc(record.repaired.fileName)}</strong>，与原件对照。`
+    : report.repairBlocked
+    ? '此文件只能检查。请保留原件，先核对下方需要处理的项目。'
+    : `先在 Windows 的 ${officeApp} 中打开原件。如果显示和编辑正常，可以直接使用。`;
+  const review = report.format === 'xlsx'
+    ? '对照打印预览中的总页数和每页首末行，再修改一个测试数值，保存副本并重新打开。'
+    : '看一眼标题和窄文本框的换行，再播放带动画的页面，核对点击顺序。';
   const comparison = report.inventory?.targetFontComparison;
   const comparisonHtml = comparison ? `<h2>目标 Windows 字体名单核对</h2><p>已核对 ${comparison.nameCount} 个目标字体名称，含文档的主题备用声明。以下仅列出文档声明的字体。</p><p>名单有：${esc(comparison.listed.join('、') || '无')}</p><p>名单未列出：${esc(comparison.unlisted.join('、') || '无')}</p><p>名称匹配用于筛选替换建议。别名、云字体、嵌入字体、字形覆盖与实际换行需在目标电脑确认。</p>` : '';
   const repairedRows = repairedIssues.map((issue) => `<tr><td>${esc(severityLabels[issue.severity] || '提示')}</td><td><strong>${esc(issue.title)}</strong><p>${esc(issue.description)}</p>${issue.evidence ? `<p>证据：${esc(issue.evidence)}</p>` : ''}${issue.recommendation ? `<p>建议：${esc(issue.recommendation)}</p>` : ''}</td><td>${esc(issue.location || issue.part || '文件整体')}</td></tr>`).join('');
@@ -59,7 +68,8 @@ export function buildHtmlReport(record) {
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'"><title>${esc(report.fileName)} — OfficeBridge 检查报告</title><style>
 *{box-sizing:border-box}body{margin:0;overflow-wrap:anywhere;background:#f5f7fa;color:#1b2942;font:15px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1050px;margin:40px auto;padding:36px;background:white;border:1px solid #dce3ec;border-radius:18px}header{border-bottom:1px solid #e5eaf1;padding-bottom:20px}.brand{color:#245fe5;font-weight:750;letter-spacing:.02em}h1{font-size:26px;overflow-wrap:anywhere}h2{font-size:20px;margin-top:32px}p{margin:8px 0}.muted{color:#65748c}.notice{padding:16px;border-left:4px solid #df9a23;background:#fff8e8;margin:24px 0}table{width:100%;border-collapse:collapse}td,th{vertical-align:top;text-align:left;border-bottom:1px solid #e5eaf1;padding:14px 10px;overflow-wrap:anywhere}th{background:#f5f7fb;font-size:13px}code{display:block;font-size:12px;white-space:normal;color:#65748c;margin-top:8px;overflow-wrap:anywhere}.badge{display:inline-block;white-space:nowrap;font-size:12px;border-radius:5px;padding:4px 7px}.error{color:#ad3542;background:#fff0f1}.warning{color:#8d5a0a;background:#fff7e7}.info{color:#315f98;background:#edf4ff}footer{border-top:1px solid #e5eaf1;margin-top:32px;padding-top:20px;font-size:12px;color:#65748c}@media(max-width:650px){main{margin:0;border:0;border-radius:0;padding:22px}table{font-size:12px}td,th{padding:10px 6px}}@media print{body{background:white}main{border:0;margin:0;padding:0}tr{break-inside:avoid}}
 </style></head><body><main><header><div class="brand">OfficeBridge · 兼容检查报告</div><h1>${esc(report.fileName)}</h1><p class="muted">${esc(String(report.format || '').toUpperCase())} · ${esc(formatBytes(report.fileSize))} · ${esc(new Date(payload.generatedAt).toLocaleString('zh-CN'))}</p></header>
-<div class="notice"><strong>尚未在 Windows Office 中实际验证</strong><p>本报告基于文档结构检查。没有发现风险，不等于已保证排版一致。请用目标电脑打开副本，检查版式与功能。</p></div>
+<div class="notice"><strong>接下来怎么做</strong><p>${nextStep}</p><p>${review}</p></div>
+<p class="muted">此文件尚未在 Windows Office 中实际验证。本报告记录本机的文件结构检查。</p>
 <h2>本次检查参数</h2><p>目标环境：Windows Office。${mappingRows ? '以下为用户为此文件指定的字体规则，仅生成建议；只有修改记录中列出的替换已应用到副本。目标电脑仍须安装相应字体，且替换可能影响排版。' : '未设置自定义字体规则，使用内置字体建议。'}</p>${mappingRows ? `<table><thead><tr><th>原字体</th><th>用户指定的目标字体</th></tr></thead><tbody>${mappingRows}</tbody></table>` : ''}
 ${comparisonHtml}<h2>原文件检查结果</h2><p>${report.issues?.length || 0} 项发现。${report.repairBlocked ? '文件禁止自动修复；请在原始应用中处理后重新导出。' : '仅明确选择的字体替换会应用到副本，原件不变。'}</p>
 ${rows ? `<table><thead><tr><th>级别</th><th>发现与建议</th><th>位置</th></tr></thead><tbody>${rows}</tbody></table>` : '<p>没有发现当前规则覆盖的风险。</p>'}
@@ -74,8 +84,11 @@ export function downloadBlob(content, name, type) {
   const link = document.createElement('a');
   link.href = url;
   link.download = safeFileName(name);
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  try {
+    document.body.append(link);
+    link.click();
+  } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 }

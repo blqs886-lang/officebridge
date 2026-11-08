@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { analyzeOffice } from '../src/engine/index.js';
-import { unzipSync, zipSync, strToU8 } from 'fflate';
+import { unzipSync, zipSync, strToU8, strFromU8 } from 'fflate';
 import { buildHtmlReport, safeFileName, escapeHtml } from '../src/ui/reports.js';
 import { donationUrl, label as donationLabel, validateDonationUrl } from '../src/support-config.js';
 
@@ -51,10 +52,11 @@ const playwright = await import('playwright').catch(async (error) => {
 const { chromium } = playwright;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const baseUrl = process.env.APP_URL || 'http://127.0.0.1:5173/';
-const outputDir = path.join(projectRoot, 'work', 'browser-smoke');
+const outputDir = process.env.BROWSER_SMOKE_OUT ? path.resolve(process.env.BROWSER_SMOKE_OUT) : path.join(projectRoot, 'work', 'browser-smoke');
 await fs.mkdir(outputDir, { recursive: true });
 const browser = await chromium.launch({ headless: true, chromiumSandbox: true, ...(process.env.BROWSER_CHANNEL ? { channel: process.env.BROWSER_CHANNEL } : {}) });
-const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
+const isLocalFile = new URL(baseUrl).protocol === 'file:';
+const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true, offline: isLocalFile });
 const page = await context.newPage();
 const failures = [];
 const requests = [];
@@ -75,9 +77,14 @@ context.on('page', watchPage);
 context.on('request', (request) => requests.push({ method: request.method(), url: request.url() }));
 const checks = [];
 const test = async (name, fn) => { await fn(); checks.push(name); console.log(`PASS ${name}`); };
-const clickDownload = async (selector, name) => {
-  const downloadPromise = page.waitForEvent('download');
-  await page.locator(selector).click();
+async function expandSection(view, selector) {
+  const section = view.locator(selector);
+  if (!await section.evaluate(element => element.open)) await section.locator(':scope > summary').click();
+}
+const clickDownload = async (selector, name, view = page) => {
+  if (['#download-json', '#download-html'].includes(selector)) await expandSection(view, '.report-details');
+  const downloadPromise = view.waitForEvent('download');
+  await view.locator(selector).click();
   const download = await downloadPromise;
   const target = path.join(outputDir, name || download.suggestedFilename());
   await download.saveAs(target);
@@ -89,7 +96,9 @@ try {
   await page.goto(baseUrl);
   await page.locator('#choose-files').waitFor({ state: 'visible' });
   await test('首页可用且没有横向溢出', async () => {
-    assert.equal(await page.title(), 'OfficeBridge · 文档兼容工作台');
+    assert.match(await page.title(), /OfficeBridge/);
+    assert.equal(await page.locator('#workspace').isVisible(), false);
+    assert.ok(await page.getByRole('button', { name: '选择文件', exact: true }).isVisible());
     const configuredSupportUrl = validateDonationUrl(donationUrl);
     if (configuredSupportUrl) {
       const supportLink = page.locator('#support-link');
@@ -107,6 +116,57 @@ try {
     await page.screenshot({ path: path.join(outputDir, 'desktop-home.png'), fullPage: true });
   });
 
+  await test('新用户可用键盘打开文件选择器，检查后回到上传入口', async () => {
+    const newcomer = await context.newPage();
+    await newcomer.setViewportSize({ width: 320, height: 740 });
+    await newcomer.goto(baseUrl);
+    assert.ok(await newcomer.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await newcomer.screenshot({ path: path.join(outputDir, 'mobile-home.png'), fullPage: true });
+    for (let step = 0; step < 12 && !await newcomer.locator('#choose-files').evaluate(node => node.matches(':focus')); step++) {
+      await newcomer.keyboard.press('Tab');
+    }
+    assert.ok(await newcomer.locator('#choose-files').evaluate(node => node.matches(':focus')), 'Keyboard focus reaches the file chooser');
+    const waiting = newcomer.waitForEvent('filechooser');
+    await newcomer.keyboard.press('Enter');
+    const chooser = await waiting;
+    assert.equal(chooser.isMultiple(), true);
+    await chooser.setFiles(path.join(projectRoot, 'public/examples/officebridge-demo.pptx'));
+    await newcomer.locator('.result-summary').waitFor();
+    assert.equal(await newcomer.locator('.document-title h2').innerText(), 'officebridge-demo.pptx');
+    assert.ok(await newcomer.locator('#workspace').evaluate(node => node.contains(document.activeElement)), 'File choice moves focus into the workspace');
+    assert.equal(await newcomer.locator('[data-issue-id]:checked').count(), 0);
+    assert.equal(await newcomer.locator('.findings-details').evaluate(node => node.open), false);
+    assert.equal(await newcomer.locator('.report-details').evaluate(node => node.open), false);
+    await newcomer.locator('#clear-files').focus();
+    await newcomer.keyboard.press('Enter');
+    await newcomer.locator('#workspace').waitFor({ state: 'hidden' });
+    assert.ok(await newcomer.locator('#choose-files').evaluate(node => node.matches(':focus')));
+    await newcomer.close();
+  });
+
+  await test('拖入普通表格可直接沿用原件，没有替换操作', async () => {
+    const original = await context.newPage();
+    const parts = unzipSync(await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.xlsx')));
+    parts['xl/styles.xml'] = strToU8(strFromU8(parts['xl/styles.xml']).replaceAll('PingFang SC', 'Arial').replaceAll('Helvetica Neue', 'Arial'));
+    const simpleSheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>4</v></c></row></sheetData></worksheet>';
+    for (const sheet of ['sheet1', 'sheet2']) parts[`xl/worksheets/${sheet}.xml`] = strToU8(simpleSheet);
+    await original.goto(baseUrl);
+    const data = await original.evaluateHandle(bytes => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([Uint8Array.from(bytes)], '普通表格.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      return transfer;
+    }, Array.from(zipSync(parts)));
+    try {
+      await original.locator('#drop-zone').dispatchEvent('drop', { dataTransfer: data });
+    } finally { await data.dispose(); }
+    await original.locator('.result-summary[data-outcome="original"]').waitFor();
+    assert.match(await original.locator('.result-summary').innerText(), /原件/);
+    assert.equal(await original.locator('[data-issue-id]').count(), 0);
+    assert.equal(await original.locator('#repair-file').isEnabled(), false);
+    assert.equal(await original.locator('#download-repaired').count(), 0);
+    await original.close();
+  });
+
   await test('批量上传 PPTX/XLSX，默认不启用字体替换', async () => {
     await page.locator('#file-input').setInputFiles([
       path.join(projectRoot, 'public/examples/officebridge-demo.xlsx'),
@@ -121,13 +181,18 @@ try {
   });
 
   let repairedPath;
-  await test('选择建议后生成并下载可编辑 XLSX 副本', async () => {
+  await test('一次点击生成并下载 XLSX，再次下载仍是同一份可编辑副本', async () => {
     await page.locator('#select-fixes').click();
     assert.equal(await page.locator('#repair-file').isEnabled(), true);
-    await page.locator('#repair-file').click();
+    repairedPath = await clickDownload('#repair-file', 'repaired.xlsx');
     await page.locator('#download-repaired').waitFor();
-    repairedPath = await clickDownload('#download-repaired', 'repaired.xlsx');
-    const report = await analyzeOffice(new Uint8Array(await fs.readFile(repairedPath)), 'repaired.xlsx');
+    const repairedBytes = await fs.readFile(repairedPath);
+    const repeated = await clickDownload('#download-repaired', 'repaired-again.xlsx');
+    assert.deepEqual(await fs.readFile(repeated), repairedBytes, 'Repeat download reuses the generated copy');
+    const before = unzipSync(await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.xlsx')));
+    const after = unzipSync(repairedBytes);
+    for (const sheet of ['xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml']) assert.deepEqual(after[sheet], before[sheet], 'Budget formula, input and text IDs must stay editable');
+    const report = await analyzeOffice(repairedBytes, 'repaired.xlsx');
     assert.equal(report.repairBlocked, false);
     assert.equal(report.validation.windowsOfficeTested, false);
     assert.equal(report.issues.filter((issue) => issue.fixable).length, 0);
@@ -169,18 +234,106 @@ try {
   await test('演示文稿也可生成可编辑副本', async () => {
     await page.locator('.file-card').filter({ hasText: 'officebridge-demo.pptx' }).click();
     await page.locator('#select-fixes').click();
-    await page.locator('#repair-file').click();
-    await page.locator('#download-repaired').waitFor();
-    const output = await clickDownload('#download-repaired', 'repaired.pptx');
-    const report = await analyzeOffice(new Uint8Array(await fs.readFile(output)), 'repaired.pptx');
+    const output = await clickDownload('#repair-file', 'repaired.pptx');
+    const bytes = await fs.readFile(output);
+    const slides = unzipSync(bytes);
+    assert.ok(Object.hasOwn(slides, 'ppt/charts/chart1.xml'), 'PowerPoint chart is still editable');
+    assert.match(strFromU8(slides['ppt/slides/slide1.xml']), /<a:t>[^<]+<\/a:t>/, 'Slide still contains native text');
+    const report = await analyzeOffice(bytes, 'repaired.pptx');
     assert.equal(report.repairBlocked, false);
     assert.equal(report.issues.filter((issue) => issue.fixable).length, 0);
     assert.equal(report.inventory.slideCount, 2);
   });
 
+  await test('同种字体可整组选用或逐处取消，调整后只导出当前选择', async () => {
+    const view = await context.newPage();
+    const sample = path.join(projectRoot, 'public/examples/officebridge-demo.pptx');
+    const input = await fs.readFile(sample);
+    await view.goto(baseUrl);
+    await view.locator('#file-input').setInputFiles(sample);
+    const group = view.locator('[data-font-group]');
+    await group.check();
+    assert.equal(await view.locator('[data-issue-id]:checked').count(), 2);
+    const both = await clickDownload('#repair-file', 'both-slides.pptx', view);
+    await view.locator('#download-repaired').waitFor();
+    const allChanges = JSON.parse(await fs.readFile(await clickDownload('#download-json', 'both-slides.json', view), 'utf8')).repair.changes;
+    assert.deepEqual(allChanges.map(change => change.part).sort(), ['ppt/slides/slide1.xml', 'ppt/slides/slide2.xml']);
+    await expandSection(view, '.font-places');
+    await view.locator('.font-places [data-issue-id]').last().uncheck();
+    assert.ok(await group.evaluate(node => node.indeterminate), 'Partial group communicates its mixed state');
+    assert.equal(await view.locator('#download-repaired').count(), 0);
+    const interim = JSON.parse(await fs.readFile(await clickDownload('#download-json', 'partial-pending.json', view), 'utf8'));
+    assert.equal(interim.repair, null);
+    const partial = await clickDownload('#repair-file', 'one-slide.pptx', view);
+    const changes = JSON.parse(await fs.readFile(await clickDownload('#download-json', 'one-slide.json', view), 'utf8')).repair.changes;
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].before, 'PingFang SC');
+    const source = unzipSync(input);
+    const bothSlides = unzipSync(await fs.readFile(both));
+    const oneSlide = unzipSync(await fs.readFile(partial));
+    for (const { part } of allChanges) {
+      assert.notDeepEqual(bothSlides[part], source[part]);
+      assert.deepEqual(oneSlide[part], changes[0].part === part ? bothSlides[part] : source[part]);
+    }
+    await view.locator('#clear-fixes').click();
+    assert.equal(await view.locator('[data-issue-id]:checked').count(), 0);
+    assert.equal(await view.locator('#repair-file').isEnabled(), false);
+    assert.equal(await view.locator('#download-repaired').count(), 0);
+    await view.close();
+  });
+
+  await test('首次下载未启动时，保留生成的副本供手动重新下载', async () => {
+    const retry = await context.newPage();
+    await retry.addInitScript(() => {
+      const normalClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {
+        if (this.download.endsWith('.windows.xlsx')) {
+          HTMLAnchorElement.prototype.click = normalClick;
+          throw new DOMException('Test download refused', 'NotAllowedError');
+        }
+        normalClick.call(this);
+      };
+    });
+    await retry.goto(baseUrl);
+    await retry.locator('#demo-xlsx').click();
+    await retry.locator('#select-fixes').click();
+    await retry.locator('#repair-file').click();
+    await retry.locator('#copy-download-error').waitFor();
+    await retry.locator('#download-repaired').waitFor();
+    assert.equal(await retry.locator('a[download]').count(), 0, 'A refused download must release its temporary link');
+    const copy = await clickDownload('#download-repaired', 'manual-retry.xlsx', retry);
+    assert.equal(await retry.locator('#copy-download-error').isVisible(), false);
+    const report = await analyzeOffice(await fs.readFile(copy), 'manual-retry.xlsx');
+    assert.equal(report.issues.filter(issue => issue.fixable).length, 0);
+    assert.equal(report.inventory.worksheets.length, 2);
+    await retry.close();
+  });
+
+  await test('Keynote、Numbers 与可用文件一起选入时，各自得到正确指引', async () => {
+    const mixed = await context.newPage();
+    await mixed.goto(baseUrl);
+    const workbook = await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.xlsx'));
+    await mixed.locator('#file-input').setInputFiles([
+      { name: '演示.key', mimeType: 'application/octet-stream', buffer: Buffer.from('example') },
+      { name: '预算.numbers', mimeType: 'application/octet-stream', buffer: Buffer.from('example') },
+      { name: '可用表格.xlsx', mimeType: 'application/octet-stream', buffer: workbook },
+    ]);
+    await mixed.locator('.result-summary').waitFor();
+    assert.equal(await mixed.locator('.file-card').count(), 1);
+    assert.equal(await mixed.locator('.document-title h2').innerText(), '可用表格.xlsx');
+    const errors = await mixed.locator('#input-errors li').allTextContents();
+    assert.equal(errors.length, 2);
+    assert.match(errors[0], /演示\.key.*Keynote.*PowerPoint.*\.pptx/);
+    assert.match(errors[1], /预算\.numbers.*Numbers.*Excel.*\.xlsx/);
+    await mixed.locator('#dismiss-input-errors').click();
+    assert.equal(await mixed.locator('#input-errors').isVisible(), false);
+    assert.equal(await mixed.locator('.file-card').count(), 1);
+    await mixed.close();
+  });
+
   await test('不支持、空文件和损坏文件给出可读错误', async () => {
     await page.locator('#file-input').setInputFiles({ name: 'unsupported.txt', mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
-    await page.locator('#toast').filter({ hasText: '目前只支持 PPTX 和 XLSX' }).waitFor();
+    await page.locator('#input-errors').filter({ hasText: /unsupported\.txt.*\.pptx.*\.xlsx/i }).waitFor();
     assert.equal(await page.locator('.file-card').count(), 3);
     await page.locator('#file-input').setInputFiles({ name: 'empty.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.alloc(0) });
     await page.locator('#toast').filter({ hasText: '空文件' }).waitFor();
@@ -194,7 +347,7 @@ try {
     contents['_xmlsignatures/sig1.xml'] = strToU8('<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/>');
     await page.locator('#file-input').setInputFiles({ name: 'signed.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.from(zipSync(contents)) });
     await page.locator('.file-card').filter({ hasText: 'signed.xlsx' }).click();
-    await page.getByText('此文件不适合自动修复').waitFor();
+    await page.locator('.result-summary[data-outcome="blocked"]').waitFor();
     assert.equal(await page.locator('[data-issue-id]').count(), 0);
     assert.equal(await page.locator('#repair-file').isEnabled(), false);
     assert.equal(await page.locator('#select-fixes').isEnabled(), false);
@@ -241,6 +394,7 @@ try {
 
   await test('窄屏工作台无横向溢出，可操作修复和筛选', async () => {
     await page.setViewportSize({ width: 390, height: 844 });
+    await expandSection(page, '.findings-details');
     await page.locator('[data-filter="warning"]').click();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.locator('#select-fixes').click();
@@ -332,14 +486,7 @@ try {
     assert.equal(await custom.locator('#download-repaired').count(), 0);
     assert.equal(await custom.locator('[data-issue-id]:checked').count(), 0);
     assert.equal(await custom.locator('#repair-file').isEnabled(), false);
-    const downloadCustom = async (selector, name) => {
-      const waiting = custom.waitForEvent('download');
-      await custom.locator(selector).click();
-      const download = await waiting;
-      const file = path.join(outputDir, name);
-      await download.saveAs(file);
-      return file;
-    };
+    const downloadCustom = (selector, name) => clickDownload(selector, name, custom);
     const pendingReportPath = await downloadCustom('#download-json', 'custom-before-repair.json');
     const before = JSON.parse(await fs.readFile(pendingReportPath, 'utf8'));
     assert.deepEqual(before.analysisOptions.fontMappings, { 'OfficeBridge Test Font': 'Arial' });
@@ -352,7 +499,7 @@ try {
     const otherPath = await downloadCustom('#download-json', 'custom-other-file.json');
     assert.deepEqual(JSON.parse(await fs.readFile(otherPath, 'utf8')).analysisOptions.fontMappings, {});
     await custom.locator('.file-card').filter({ hasText: 'custom-font.xlsx' }).click();
-    await custom.locator('.issue-card').filter({ hasText: '字体「OfficeBridge Test Font」' }).locator('[data-issue-id]').check();
+    await custom.locator('.font-choice').filter({ hasText: 'OfficeBridge Test Font' }).locator('[data-issue-id]').check();
     await custom.locator('#repair-file').click();
     await custom.locator('#download-repaired').waitFor();
     const afterPath = await downloadCustom('#download-json', 'custom-after-repair.json');
@@ -378,7 +525,7 @@ try {
     await custom.locator('#font-source').selectOption('OfficeBridge Test Font');
     await custom.locator('#font-target').fill('Wingdings');
     await custom.locator('#add-font-rule').click();
-    await custom.locator('.font-settings-error').waitFor();
+    await custom.locator('#font-settings .font-settings-error').waitFor();
     assert.equal(await custom.locator('.font-rule').count(), 0);
     assert.equal(await custom.locator('#repair-file').isEnabled(), false);
     await custom.close();
@@ -395,6 +542,7 @@ try {
     await firstUse.locator('#repair-file').click();
     await firstUse.locator('#download-repaired').waitFor();
     const originalCopyName = await firstUse.locator('.repaired-name').innerText();
+    await expandSection(firstUse, '.findings-details');
     await firstUse.locator('[data-filter="info"]').click();
     await firstUse.locator('#file-input').setInputFiles({ name: 'my-first-workbook.xlsx', mimeType: 'application/octet-stream', buffer: await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.xlsx')) });
     await firstUse.locator('.document-title h2').filter({ hasText: 'my-first-workbook.xlsx' }).waitFor();
@@ -408,12 +556,85 @@ try {
     assert.equal(await firstUse.locator('.repaired-name').innerText(), originalCopyName);
     assert.equal(await firstUse.locator('#download-repaired').isVisible(), true);
     await firstUse.locator('#file-input').setInputFiles({ name: 'unsupported.txt', mimeType: 'text/plain', buffer: Buffer.from('synthetic') });
-    await firstUse.locator('#toast').filter({ hasText: '目前只支持 PPTX 和 XLSX' }).waitFor();
+    await firstUse.locator('#input-errors').filter({ hasText: /unsupported\.txt.*\.pptx.*\.xlsx/i }).waitFor();
     assert.equal(await firstUse.locator('.document-title h2').innerText(), '季度预算示例.xlsx');
     assert.equal(await firstUse.locator('.file-card').count(), 2);
     assert.equal(await firstUse.locator('[data-issue-id]:checked').count(), selectedCount);
     assert.equal(await firstUse.locator('.repaired-name').innerText(), originalCopyName);
     await firstUse.close();
+  });
+
+  await test('晚到的样例不会抢走后来选的文件，也不会重新填入已清空的列表', async () => {
+    const view = await context.newPage();
+    await view.addInitScript(() => {
+      const send = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (job, transfer) {
+        if (job.type !== 'demo') return send.call(this, job, transfer);
+        window.finishTestDemo = () => new Promise(resolve => {
+          delete window.finishTestDemo;
+          const onReply = ({ data }) => {
+            if (data.id !== job.id) return;
+            this.removeEventListener('message', onReply);
+            setTimeout(resolve, 0);
+          };
+          this.addEventListener('message', onReply);
+          send.call(this, job, transfer);
+        });
+      };
+    });
+    await view.goto(baseUrl);
+    async function startSlowDemo() {
+      await view.locator('#demo-xlsx').click();
+      await view.waitForFunction(() => typeof window.finishTestDemo === 'function');
+    }
+    async function finishDemo() {
+      await view.evaluate(() => window.finishTestDemo());
+      await view.waitForFunction(() => !document.querySelector('#demo-xlsx').disabled);
+    }
+    await startSlowDemo();
+    await view.locator('#file-input').setInputFiles(path.join(projectRoot, 'public/examples/officebridge-demo.pptx'));
+    await view.locator('.result-summary').waitFor();
+    await view.locator('#select-fixes').click();
+    const selected = await view.locator('[data-issue-id]:checked').count();
+    assert.ok(selected > 0);
+    await finishDemo();
+    assert.equal(await view.locator('.document-title h2').innerText(), 'officebridge-demo.pptx');
+    assert.equal(await view.locator('[data-issue-id]:checked').count(), selected);
+    await startSlowDemo();
+    await view.locator('#clear-files').click();
+    await finishDemo();
+    assert.equal(await view.locator('.file-card').count(), 0);
+    assert.equal(await view.locator('#workspace').isVisible(), false);
+    assert.ok(await view.locator('#choose-files').evaluate(node => node.matches(':focus')));
+    await view.close();
+  });
+
+  await test('生成期间切换文件，下载与修改记录仍属于最初选择的文档', async () => {
+    const view = await context.newPage();
+    await view.addInitScript(() => {
+      // Hold only the repair request so a real tab switch can happen before its worker responds.
+      const send = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (job, transfer) {
+        if (job.type !== 'repair') return send.call(this, job, transfer);
+        window.continueTestRepair = () => send.call(this, job, transfer);
+      };
+    });
+    await view.goto(baseUrl);
+    await view.locator('#file-input').setInputFiles(['xlsx', 'pptx'].map(ext => path.join(projectRoot, `public/examples/officebridge-demo.${ext}`)));
+    await view.locator('#select-fixes').click();
+    await view.locator('#repair-file').click();
+    await view.waitForFunction(() => typeof window.continueTestRepair === 'function');
+    await view.locator('.file-card').filter({ hasText: 'officebridge-demo.pptx' }).click();
+    const download = view.waitForEvent('download');
+    await view.evaluate(() => window.continueTestRepair());
+    assert.equal((await download).suggestedFilename(), 'officebridge-demo.windows.xlsx');
+    assert.equal(await view.locator('.document-title h2').innerText(), 'officebridge-demo.pptx');
+    assert.equal(await view.locator('#download-repaired').count(), 0);
+    const untouched = JSON.parse(await fs.readFile(await clickDownload('#download-json', 'untouched.json', view), 'utf8'));
+    assert.equal(untouched.repair, null);
+    await view.locator('.file-card').filter({ hasText: 'officebridge-demo.xlsx' }).click();
+    assert.equal(await view.locator('.repaired-name').innerText(), 'officebridge-demo.windows.xlsx');
+    await view.close();
   });
 
   await test('目标字体名单能筛选修复、保存再导入，每个文稿独立使用', async () => {
@@ -432,14 +653,7 @@ try {
     assert.equal(await sheet.locator('[data-issue-id]:checked').count(), 0);
     await sheet.setViewportSize({ width: 320, height: 740 });
     assert.ok(await sheet.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    const save = async (selector, file) => {
-      const waiting = sheet.waitForEvent('download');
-      await sheet.locator(selector).click();
-      const download = await waiting;
-      const target = path.join(outputDir, file);
-      await download.saveAs(target);
-      return fs.readFile(target);
-    };
+    const save = async (selector, file) => fs.readFile(await clickDownload(selector, file, sheet));
     const list = await save('#save-font-list', 'target-list.txt');
     assert.match(list.toString(), /Private QA unreferenced family/);
     await sheet.locator('#select-fixes').click();
@@ -451,7 +665,7 @@ try {
     assert.ok(payload.repair.changes.every(change => change.after === 'Arial'));
     assert.ok(payload.repair.report.inventory.targetFontComparison.listed.includes('Arial'));
     await importList(Buffer.from([0xff, 0x51]));
-    await sheet.locator('.font-settings-error').waitFor();
+    await sheet.locator('#font-settings .font-settings-error').waitFor();
     assert.ok(await sheet.locator('#download-repaired').isVisible(), 'Invalid import must retain the last good output');
     await sheet.locator('#remove-font-list').click();
     await sheet.waitForFunction(() => !document.querySelector('#font-comparison') && !document.querySelector('#choose-font-list').disabled);
@@ -486,8 +700,8 @@ try {
     await denied.locator('#font-comparison').waitFor();
     for (const expected of ['没有提供可读取的字体', '未提供本机字体']) {
       await denied.locator('#read-local-fonts').click();
-      await denied.waitForFunction(msg => document.querySelector('.font-settings-error')?.textContent.includes(msg), expected);
-      assert.match(await denied.locator('.font-settings-error').innerText(), /导入字体名单/);
+      await denied.waitForFunction(msg => document.querySelector('#font-settings .font-settings-error')?.textContent.includes(msg), expected);
+      assert.match(await denied.locator('#font-settings .font-settings-error').innerText(), /导入字体名单/);
       assert.match(await denied.locator('#font-comparison').innerText(), /已核对 1 个/);
     }
     await denied.close();
@@ -520,15 +734,16 @@ try {
       unexpectedRequests,
     };
     await fs.writeFile(path.join(outputDir, 'request-audit.json'), JSON.stringify(requestAudit, null, 2));
-    console.log(`Request audit: checked ${checkedRequests.length}; excluded ${excludedBrowserInternalRequests.length} Edge internal UI requests; ${developmentServerWebSockets.length} development-server WebSockets. Full list: work/browser-smoke/request-audit.json`);
+    console.log(`Request audit: checked ${checkedRequests.length}; excluded ${excludedBrowserInternalRequests.length} Edge internal UI requests; ${developmentServerWebSockets.length} development-server WebSockets.`);
     assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
     assert.deepEqual(unexpectedRequests, []);
     assert.deepEqual(unexpectedWebSockets, []);
     assert.deepEqual(unexpectedWebSocketFrames, []);
     assert.deepEqual(failures, []);
   });
-  await fs.writeFile(path.join(outputDir, 'result.json'), JSON.stringify({ passed: checks.length, checks, pageErrors: failures, checkedRequestCount: requestAudit.checkedRequestCount, observedRequestCount: requestAudit.observedRequestCount, externalNetworkRequestCount: requestAudit.externalNetworkRequestCount, excludedBrowserInternalRequestCount: requestAudit.excludedBrowserInternalRequestCount, webSocketConnectionCount: requestAudit.webSocketConnectionCount, developmentServerWebSocketCount: requestAudit.developmentServerWebSocketCount, requestAuditFile: 'request-audit.json' }, null, 2));
-  console.log(`Browser smoke checks passed: ${checks.length}. Artifacts: work/browser-smoke/`);
+  const appSha256 = isLocalFile ? createHash('sha256').update(await fs.readFile(fileURLToPath(baseUrl))).digest('hex') : null;
+  await fs.writeFile(path.join(outputDir, 'result.json'), JSON.stringify({ passed: checks.length, checks, browserVersion: browser.version(), offline: isLocalFile, appSha256, pageErrors: failures, checkedRequestCount: requestAudit.checkedRequestCount, observedRequestCount: requestAudit.observedRequestCount, externalNetworkRequestCount: requestAudit.externalNetworkRequestCount, excludedBrowserInternalRequestCount: requestAudit.excludedBrowserInternalRequestCount, webSocketConnectionCount: requestAudit.webSocketConnectionCount, developmentServerWebSocketCount: requestAudit.developmentServerWebSocketCount, requestAuditFile: 'request-audit.json' }, null, 2));
+  console.log(`Browser smoke checks passed: ${checks.length}. Artifacts: ${outputDir}`);
 } finally {
   await browser.close();
 }

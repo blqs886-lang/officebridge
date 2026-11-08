@@ -44,7 +44,7 @@ const portable = readArchive(new Uint8Array(await fs.readFile(path.join(release,
 const portableSources = new Map([
   ['OfficeBridge.html', path.join(release, 'OfficeBridge.html')],
   ['START-HERE.txt', path.join(release, 'START-HERE.txt')],
-  ...['LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/QUICKSTART.md', 'docs/WINDOWS-VERIFICATION.md', 'docs/TESTING.md',
+  ...['LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/QUICKSTART.md', 'docs/WINDOWS-VERIFICATION.md', 'docs/TESTING.md', 'docs/images/start.png',
     'scripts/verify-windows.ps1', 'public/examples/officebridge-demo.pptx', 'public/examples/officebridge-demo.xlsx']
     .map(file => [file, path.join(root, file)]),
 ]);

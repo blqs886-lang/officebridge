@@ -1,4 +1,5 @@
 import './style.css';
+import { fontPairHint, unsupportedFileMessage } from './ui/input-help.js';
 import { bindFontList, renderFontList } from './ui/font-list.js';
 import { listedFont } from './engine/target-fonts.js';
 import EngineWorker from './ui/worker.js?worker&inline';
@@ -13,6 +14,7 @@ const state = { records: [], activeId: null, processing: false, filter: 'all', t
 const pending = new Map();
 let nextRequest = 1;
 let nextRecord = 1;
+let fileAction = 0;
 let worker = null;
 let workerFailed = false;
 
@@ -99,33 +101,71 @@ const supportLabel = typeof donationLabel === 'string' && donationLabel.trim() ?
 const supportFooter = supportUrl ? `<div class="support-footer" id="support-footer"><a id="support-link" href="${esc(supportUrl)}" target="_blank" rel="noopener noreferrer">${esc(supportLabel)}</a><small>自愿支持，不影响免费功能</small></div>` : '';
 
 document.querySelector('#app').innerHTML = `
-  <a class="skip-link" href="#workspace">跳到工作台</a>
+  <a class="skip-link" href="#choose-files">跳到选择文件</a>
   <header class="site-header"><div class="header-inner">
-    <a class="brand" href="#" aria-label="OfficeBridge 首页"><span class="brand-symbol">${icon('bridge')}</span><span>OfficeBridge<small>文档兼容工作台</small></span></a>
-    <nav aria-label="主导航"><a class="nav-active" href="#workspace">工作台</a><a href="#verification">交接指南</a></nav>
-    <span class="privacy-label">${icon('shield')} 文档仅在本机处理</span>
+    <a class="brand" href="#start" aria-label="OfficeBridge 首页"><span class="brand-symbol">${icon('bridge')}</span><span>OfficeBridge</span></a>
+    <nav aria-label="主导航"><a href="#verification" id="open-help">使用帮助</a></nav>
+    <span class="privacy-label">${icon('shield')} 文件只在本机处理</span>
   </div></header>
-  <main class="page-shell">
-    <section class="hero" aria-labelledby="hero-title"><div><p class="eyebrow"><span class="eyebrow-line"></span> MAC <span class="direction">→</span> WINDOWS</p><h1 id="hero-title">好文档，不该困在一个系统。</h1><p class="hero-copy">检查演示文稿和表格的兼容风险，按你的选择生成可编辑副本。<br class="desktop-break">保留可编辑内容，让跨系统交接更有把握。</p></div><div class="hero-motif" aria-hidden="true"><span class="motif-doc">${icon('pptx')}</span><span class="motif-arrow">${icon('arrow')}</span><span class="motif-doc green">${icon('xlsx')}</span><span class="motif-caption">内容完整 · 继续编辑</span></div></section>
-    <section class="upload-section" aria-labelledby="upload-title"><div id="drop-zone" class="drop-zone"><div class="upload-icon">${icon('upload')}</div><div class="upload-copy"><h2 id="upload-title">把文件拖到这里，先做一次检查</h2><p>PPTX / XLSX · 单个 100 MB · 每批最多 20 个 / 共 250 MB</p><span class="upload-detail">支持批量，依次在浏览器本机处理。不会上传文档。</span></div><div class="upload-action"><button class="button primary" id="choose-files">${icon('upload')} 选择文件</button><span>或直接拖放到这里</span></div><input type="file" id="file-input" accept=".pptx,.xlsx,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden></div><div class="demo-row"><span>还没有文件？用合成样例体验</span><button class="text-button" id="demo-pptx">演示文稿 ${icon('arrow')}</button><span class="demo-divider"></span><button class="text-button" id="demo-xlsx">电子表格 ${icon('arrow')}</button><span class="demo-note">样例仅用于展示检查流程</span></div></section>
-    <section id="workspace" class="workspace" aria-label="文档工作台" tabindex="-1"><aside class="queue-panel"><div class="panel-label"><h2>文件列表 <span id="file-count">0</span></h2><button id="clear-files" class="subtle-button" hidden>清空</button></div><div id="file-list" class="file-list"></div><div class="queue-footer">${icon('shield')}<p>原文件始终保持不变。<br>关闭或刷新页面会清空本次工作台。</p></div></aside><div id="document-panel" class="document-panel" aria-live="off"></div></section>
-    <section class="verification" id="verification" aria-labelledby="verification-title"><div class="verification-heading"><span class="section-kicker">最后一步，在目标电脑确认</span><h2 id="verification-title">自动检查之后，交接之前。</h2><p>结构检查能减少风险，但不能替代 Windows Office 实际打开验证。</p></div><div class="verification-steps"><div><span class="step-number">01</span><h3>打开修复副本</h3><p>用收件人实际使用的 Windows Office 或 WPS 版本打开文件。</p></div><div><span class="step-number">02</span><h3>检查外观与功能</h3><p>核对字体、换行和图表；试播动画，复核公式、日期及外部链接。</p></div><div><span class="step-number">03</span><h3>保存后再打开</h3><p>确认文件仍然可编辑。需要固定外观时，再附一份从原稿导出的 PDF。</p></div></div><details class="scope-details"><summary>这个工具可以处理什么？有哪些边界？</summary><div><p><strong>可以：</strong>检查当前规则覆盖的字体、对象、外链、公式及文档结构风险；经你确认后替换有明确映射建议的字体，并记录每一项修改。文档继续保留原有文本、公式和可编辑对象。</p><p><strong>仍需人工确认：</strong>字体替换可能改变换行和布局。字体可用性取决于目标电脑及 Office 安装；动画、宏、插件、链接、嵌入对象等不能靠此工具保证兼容。未知字体需由你指定目标字体，再确认是否采用替换。</p><p><strong>支持范围：</strong>未加密的标准 PPTX / XLSX。签名文件、宏文件、加密文件及存在危险结构的文件不会自动修复。Keynote、Numbers、Pages、旧版 PPT / XLS 需要先从原始软件导出。</p><p><strong>隐私：</strong>文件内容由浏览器本机处理，不传到服务器。报告可能包含文件名、字体和文档部件路径，分享前请检查。</p></div></details></section>
+  <main class="page-shell" id="start">
+    <section class="hero" aria-labelledby="hero-title"><div><h1 id="hero-title">检查发到 Windows 的文件</h1><p class="hero-copy">看看字体、排版和播放有哪些地方要留意。需要换字体时，可另存一份可编辑的副本。</p></div></section>
+    <section class="upload-section" aria-labelledby="upload-title">
+      <div id="drop-zone" class="drop-zone"><div class="upload-icon">${icon('upload')}</div>
+        <div class="upload-copy"><h2 id="upload-title">把演示文稿或表格拖到这里</h2><p>PowerPoint（.pptx）或 Excel（.xlsx），可一次选多个</p></div>
+        <div class="upload-action"><button class="button primary" id="choose-files">${icon('file')} 选择文件</button></div>
+        <input type="file" id="file-input" accept=".pptx,.xlsx,.key,.numbers,.ppt,.xls,.pptm,.xlsm,.pdf,.csv,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden>
+      </div>
+      <div class="demo-row"><span>想先试试看？</span><button class="text-button" id="demo-pptx">${icon('pptx')} 演示文稿样例</button><span class="demo-divider"></span><button class="text-button" id="demo-xlsx">${icon('xlsx')} 表格样例</button></div>
+      <div class="input-errors" id="input-errors" role="group" aria-labelledby="input-errors-title" tabindex="-1" hidden><div><strong id="input-errors-title">有文件未能添加</strong><ul></ul></div><button id="dismiss-input-errors" class="subtle-button" aria-label="关闭添加文件提示">${icon('close')}</button></div>
+    </section>
+    <section id="workspace" class="workspace" aria-label="检查结果" tabindex="-1" hidden>
+      <aside class="queue-panel"><div class="panel-label"><h2>本次文件 <span id="file-count">0</span></h2><button id="clear-files" class="subtle-button">清空列表</button></div>
+        <div id="file-list" class="file-list"></div><div class="queue-footer">${icon('shield')}<p>关闭页面会清空列表。请先下载需要的副本。</p></div></aside>
+      <div id="document-panel" class="document-panel" aria-live="off"></div>
+    </section>
+    <details class="verification" id="verification"><summary>第一次用？查看操作指南</summary>
+      <div class="verification-steps">
+        <div><h3>从 Mac 导出</h3><p>在 Keynote 或 Numbers 里打开原稿，选择“文件”→“导出为”，选 PowerPoint 或 Excel。已有 PPTX 或 XLSX 可以直接拖进来。</p></div>
+        <div><h3>决定要不要换字体</h3><p>先在 Windows 打开原件。文字和分页都正常时，直接用原件。有错位时，再到检查结果里勾选相应字体，下载副本。</p></div>
+        <div><h3>打开下载的副本</h3><p>在浏览器的下载记录里找到文件名带 .windows 的副本。在 Windows 试播幻灯片；表格看打印预览，再改一个单元格、保存并重开。</p></div>
+      </div><details class="scope-details"><summary>支持的文件与隐私</summary><div>
+        <p>每份文件最多 100 MB，本次最多 20 份、合计 250 MB。检查支持标准 PPTX 和 XLSX。受保护或含宏的文件无法生成字体替换副本。</p>
+        <p>浏览器在本机检查文件结构，字体替换可能改变换行和分页。实际效果请在接收方电脑上核对。下载的报告可能包含文件名、文字片段或链接，分享前请先查看。</p>
+      </div></details>
+    </details>
   </main>
-  <footer class="site-footer"><span class="footer-brand">OfficeBridge</span><p>保留编辑能力，认真对待每一次交接。</p>${supportFooter}<span>结构检查 ≠ Windows 实测</span></footer>
+  ${supportFooter ? `<footer class="site-footer">${supportFooter}</footer>` : ''}
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 `;
 
 const fileInput = document.querySelector('#file-input');
-document.querySelector('#choose-files').addEventListener('click', () => fileInput.click());
+const workspace = document.querySelector('#workspace');
+const inputErrors = document.querySelector('#input-errors');
+document.querySelector('#open-help').addEventListener('click', () => {
+  const help = document.querySelector('#verification');
+  help.open = true;
+  help.querySelector('summary').focus({ preventScroll: true });
+});
+document.querySelector('#dismiss-input-errors').addEventListener('click', () => {
+  inputErrors.hidden = true;
+  document.querySelector('#choose-files').focus();
+});
+document.querySelector('#choose-files').addEventListener('click', () => {
+  fileAction++;
+  fileInput.click();
+});
 fileInput.addEventListener('change', () => { enqueue(fileInput.files); fileInput.value = ''; });
 document.querySelector('#demo-pptx').addEventListener('click', () => loadDemo('pptx'));
 document.querySelector('#demo-xlsx').addEventListener('click', () => loadDemo('xlsx'));
 document.querySelector('#clear-files').addEventListener('click', () => {
   if (state.processing || state.records.some((record) => isDocumentBusy(record))) return;
+  fileAction++;
   state.records = [];
   state.activeId = null;
+  inputErrors.hidden = true;
   render();
+  document.querySelector('#choose-files').focus();
   toast('本次文件列表已清空，原文件不受影响。');
 });
 
@@ -161,11 +201,12 @@ function toast(message, type = 'info') {
 function announce(message) { document.querySelector('#announcer').textContent = message; }
 
 function enqueue(files, demo = false) {
+  if (!demo) fileAction++;
   const errors = [];
   const added = [];
   for (const file of Array.from(files)) {
     if (state.records.length >= MAX_FILES) { errors.push('每次工作台最多保留 20 个文件，请先清空已完成的列表。'); break; }
-    if (!/\.(pptx|xlsx)$/i.test(file.name)) { errors.push(`${file.name}：目前只支持 PPTX 和 XLSX。`); continue; }
+    if (!/\.(pptx|xlsx)$/i.test(file.name)) { errors.push(unsupportedFileMessage(file.name)); continue; }
     if (file.size > MAX_FILE_SIZE) { errors.push(`${file.name}：超过 100 MB 上限。`); continue; }
     if (file.size === 0) { errors.push(`${file.name}：这是一个空文件。`); continue; }
     if (state.records.reduce((sum, item) => sum + item.file.size, 0) + file.size > MAX_TOTAL_SIZE) {
@@ -175,13 +216,22 @@ function enqueue(files, demo = false) {
     state.records.push(record);
     added.push(record);
   }
-  if (errors.length) toast(errors.slice(0, 3).join(' '), 'error');
+  inputErrors.hidden = !errors.length;
+  if (errors.length) {
+    inputErrors.querySelector('ul').innerHTML = errors.map(message => `<li>${esc(message)}</li>`).join('');
+    toast(errors[0], 'error');
+  }
   if (added.length) {
     state.activeId = added[0].id;
     state.filter = 'all';
     announce(`已添加 ${added.length} 个文件，即将开始本机检查。`);
     render();
     processQueue();
+  }
+  if (errors.length || added.length) {
+    const destination = errors.length ? inputErrors : workspace;
+    destination.focus({ preventScroll: true });
+    destination.scrollIntoView({ block: 'start' });
   }
   return added;
 }
@@ -212,20 +262,22 @@ async function processQueue() {
 async function loadDemo(format) {
   if (state.demoBusy) return;
   state.demoBusy = true;
+  const action = ++fileAction;
   for (const button of document.querySelectorAll('.demo-row button')) button.disabled = true;
   try {
     const bytes = await request('demo', { format });
+    // A newer file choice or a cleared queue takes precedence over this sample.
+    if (action !== fileAction) return;
     const name = format === 'pptx' ? '跨系统交接示例.pptx' : '季度预算示例.xlsx';
-    const added = enqueue([new File([bytes], name)], true);
-    if (added.length) document.querySelector('#workspace').scrollIntoView({ behavior: reducedMotion() ? 'instant' : 'smooth', block: 'start' });
-  } catch (error) { toast(error.message, 'error'); }
-  finally {
+    enqueue([new File([bytes], name)], true);
+  } catch (error) {
+    if (action === fileAction) toast(error.message, 'error');
+  } finally {
     state.demoBusy = false;
     for (const button of document.querySelectorAll('.demo-row button')) button.disabled = false;
   }
 }
 
-function reducedMotion() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
 function activeRecord() { return state.records.find((record) => record.id === state.activeId); }
 function isDocumentBusy(record) { return ['repairing', 'reanalyzing'].includes(record.status); }
 function fixableIssues(record) {
@@ -234,7 +286,7 @@ function fixableIssues(record) {
 }
 function statusText(record) {
   return ({ queued: '等待检查', analyzing: '正在检查…', reanalyzing: '重新检查中…', repairing: '正在生成副本…', error: '无法检查' })[record.status]
-    || (record.repaired ? '副本已生成' : record.report?.repairBlocked ? '仅可查看' : `${record.report?.issues?.length || 0} 项发现`);
+    || (record.repaired ? '副本已生成' : record.report?.repairBlocked ? '仅可检查' : '检查完成');
 }
 
 function renderQueue() {
@@ -243,26 +295,93 @@ function renderQueue() {
   clear.hidden = !state.records.length;
   clear.disabled = state.processing || state.records.some((record) => isDocumentBusy(record));
   const list = document.querySelector('#file-list');
-  list.innerHTML = state.records.length ? state.records.map((record) => `<button class="file-card ${record.id === state.activeId ? 'active' : ''}" data-file-id="${record.id}" aria-pressed="${record.id === state.activeId}"><span class="file-type ${record.format}">${icon(record.format)}</span><span class="file-card-content"><strong>${esc(record.name)}</strong><span>${formatBytes(record.file.size)} <span class="file-separator">·</span> ${esc(statusText(record))}</span>${record.demo ? '<small>合成样例</small>' : ''}</span>${['queued', 'analyzing', 'reanalyzing', 'repairing'].includes(record.status) ? '<span class="spinner small" aria-hidden="true"></span>' : record.repaired ? icon('check', 'queue-check') : ''}</button>`).join('') : `<div class="queue-empty">${icon('file')}<p>文件会显示在这里</p><span>添加文件，开始检查</span></div>`;
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.fileId : null;
+  list.innerHTML = state.records.length ? state.records.map((record) => `<button class="file-card ${record.id === state.activeId ? 'active' : ''}" data-file-id="${record.id}" aria-pressed="${record.id === state.activeId}"><span class="file-type ${record.format}">${icon(record.format)}</span><span class="file-card-content"><strong>${esc(record.name)}</strong><span>${formatBytes(record.file.size)} <span class="file-separator">·</span> ${esc(statusText(record))}</span>${record.demo ? '<small>合成样例</small>' : ''}</span>${['queued', 'analyzing', 'reanalyzing', 'repairing'].includes(record.status) ? '<span class="spinner small" aria-hidden="true"></span>' : record.repaired ? icon('check', 'queue-check') : ''}</button>`).join('') : '';
+  if (focusedId) list.querySelector(`[data-file-id="${focusedId}"]`)?.focus({ preventScroll: true });
   list.querySelectorAll('[data-file-id]').forEach((button) => button.addEventListener('click', () => {
+    fileAction++;
     state.activeId = button.dataset.fileId; state.filter = 'all'; render();
+    document.querySelector('.document-title h2')?.focus();
   }));
 }
 
-function render() { renderQueue(); renderDocument(); }
+function render() {
+  workspace.hidden = !state.records.length;
+  document.body.classList.toggle('has-files', !workspace.hidden);
+  renderQueue();
+  renderDocument();
+}
 function renderRecord(record) {
   renderQueue();
   if (record.id === state.activeId) renderDocument();
+}
+
+function renderSummary(record, fixable, manual) {
+  const blocked = record.report.repairBlocked;
+  let outcome = 'original', title = '先用原文件打开看看', text = '这次检查没有建议替换的字体。请在 Windows 打开原件核对显示和编辑，正常就可以直接用。';
+  if (blocked) {
+    outcome = 'blocked'; title = '这个文件只能检查';
+    text = '请先在制作原稿的应用中处理下面的问题，再重新添加文件。';
+  } else if (manual.length) {
+    outcome = 'review'; title = '先在 Windows 核对原件';
+    text = fixable.length ? '下面的内容需要实际打开查看。如果还遇到字体错位，可以选择字体做一份副本。' : '下面的内容需要实际打开查看。这次检查没有可供替换的字体。';
+  } else if (fixable.length) {
+    outcome = 'optional'; title = '原件显示正常，就可以直接用';
+    text = '如果在 Windows 看到文字错位或换行变化，可以试试下面的字体替换。';
+  }
+  return `<div class="result-summary ${blocked ? 'blocked blocked-notice' : manual.length ? 'attention' : ''}" data-outcome="${outcome}">
+    <span class="summary-icon">${icon(blocked ? 'shield' : manual.length ? 'warning' : 'check')}</span><div>
+    <h3>${title}</h3><p>${text}</p>
+    ${manual.length ? `<ul class="review-items">${manual.slice(0, 2).map(i => `<li>${esc(i.title)}</li>`).join('')}</ul><button class="text-button" id="open-findings">查看${manual.length > 2 ? '全部' : ''}核对说明 ${icon('arrow')}</button>` : ''}
+    </div></div>`;
+}
+
+function choiceLocation(issue) {
+  const name = issue.location || issue.part || '文件整体';
+  if (name === 'xl/styles.xml') return '单元格样式';
+  if (name === 'xl/sharedStrings.xml') return '单元格文字';
+  if (/^(xl|ppt)\/theme\//.test(name)) return '文档主题';
+  return name;
+}
+
+function fontChoices(issues) {
+  const pairs = new Map();
+  for (const issue of issues) {
+    const key = JSON.stringify([issue.fix.from, issue.fix.to]);
+    if (!pairs.has(key)) pairs.set(key, []);
+    pairs.get(key).push(issue);
+  }
+  return [...pairs.values()];
+}
+
+function renderChoices(record, groups) {
+  const disabled = isDocumentBusy(record) ? 'disabled' : '';
+  function input(issue) {
+    return `<input type="checkbox" data-issue-id="${esc(issue.id)}" aria-label="${esc(issue.title)}，${esc(choiceLocation(issue))}，替换为 ${esc(issue.fix.to)}" ${record.selected.has(issue.id) ? 'checked' : ''} ${disabled}>`;
+  }
+  return groups.map((group, index) => {
+    const issue = group[0];
+    const hint = fontPairHint(issue.fix.from, issue.fix.to);
+    const map = `<span class="font-map"><strong>${esc(issue.fix.from)}</strong>${icon('arrow')}<strong>${esc(issue.fix.to)}</strong></span>`;
+    const isGroup = group.length > 1;
+    const location = isGroup ? `${group.length} 个位置` : esc(choiceLocation(issue));
+    const descriptions = [...new Set(group.filter(i => i.fix.affectsDefaultFont || i.fix.affectsWrappedRows).map(i => i.description))];
+    const examples = group.filter(i => i.fix.affectsWrappedRows && i.evidence).map(i => i.evidence);
+    const note = descriptions.length ? `<p class="choice-note">${descriptions.map(esc).join(' ')}${examples.length ? ' ' + esc(examples[0]) : ''}</p>` : '';
+    const control = isGroup ? `<input type="checkbox" data-font-group="${index}" aria-label="将 ${esc(issue.fix.from)} 替换为 ${esc(issue.fix.to)}，共 ${group.length} 个位置" ${disabled}>` : input(issue);
+    return `<article class="font-choice issue-card${isGroup ? ' font-choice-group' : ''}"><label class="fix-option">${control}<span>${map}${hint ? `<small class="choice-hint">${esc(hint)}</small>` : ''}<small class="choice-location">${location}</small></span></label>${note}
+      ${isGroup ? `<details class="font-places"><summary>逐处选择</summary>${group.map(i => `<label class="fix-option">${input(i)}<span>${esc(choiceLocation(i))}</span></label>`).join('')}</details>` : ''}</article>`;
+  }).join('');
 }
 
 function renderDocument() {
   const panel = document.querySelector('#document-panel');
   const record = activeRecord();
   if (!record) {
-    panel.innerHTML = `<div class="welcome-panel"><span class="section-kicker">一个清楚、可追溯的交接流程</span><h2>先看风险，再决定怎么修。</h2><p class="welcome-copy">不把页面变成图片，不把公式变成数值。<br>你选择的修改，才会出现在新的文件里。</p><div class="process-list"><div><span class="process-icon">${icon('file')}</span><span><strong>01 / 检查文档</strong><p>识别字体、外链与功能兼容风险。</p></span></div><div><span class="process-icon">${icon('sparkle')}</span><span><strong>02 / 确认字体替换</strong><p>查看明确建议，自己选择是否应用。</p></span></div><div><span class="process-icon">${icon('download')}</span><span><strong>03 / 下载可编辑副本</strong><p>保留原件，附上修改记录与检查报告。</p></span></div></div><div class="welcome-note">${icon('info')}<p>不提供“兼容性分数”。每一项发现，都有具体原因与位置。</p></div></div>`;
+    panel.replaceChildren();
     return;
   }
-  const heading = `<div class="document-heading"><div class="document-title"><span class="file-type large ${record.format}">${icon(record.format)}</span><div><p class="section-kicker">${record.format === 'pptx' ? '演示文稿' : '电子表格'} ${record.demo ? '· 合成样例' : ''}</p><h2>${esc(record.name)}</h2><p class="document-meta">${formatBytes(record.file.size)} <span>·</span> 目标：Windows Office <span>·</span> 原件不修改</p></div></div></div>`;
+  const heading = `<div class="document-heading"><div class="document-title"><span class="file-type large ${record.format}">${icon(record.format)}</span><div><p class="section-kicker">${record.format === 'pptx' ? '演示文稿' : '电子表格'} ${record.demo ? '· 合成样例' : ''}</p><h2 tabindex="-1">${esc(record.name)}</h2><p class="document-meta">${formatBytes(record.file.size)} <span>·</span> 原文件</p></div></div></div>`;
   if (['queued', 'analyzing'].includes(record.status)) {
     panel.innerHTML = `${heading}<div class="processing-panel"><span class="spinner"></span><h3>${record.status === 'queued' ? '文件已加入检查队列' : '正在检查文档结构'}</h3><p>${record.status === 'queued' ? '正在依次处理文件，请稍候。' : '检查字体、引用关系和可能影响交接的功能。'}</p><span>文件留在本机，较大文件可能需要一点时间。</span></div>`;
     return;
@@ -275,29 +394,59 @@ function renderDocument() {
   const issues = report.issues || [];
   const counts = { error: issues.filter((issue) => issue.severity === 'error').length, warning: issues.filter((issue) => issue.severity === 'warning').length, info: issues.filter((issue) => issue.severity === 'info').length };
   const fixable = fixableIssues(record);
+  const groups = fontChoices(fixable);
+  const manual = issues.filter(issue => !issue.fixable && (issue.severity === 'error' || issue.severity === 'warning'));
+  manual.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
+  const busy = isDocumentBusy(record);
   const inventory = report.inventory || {};
-  const pages = record.format === 'pptx' ? inventory.slideCount : Array.isArray(inventory.worksheets) ? inventory.worksheets.length : inventory.worksheetCount;
-  const fontsCount = Array.isArray(inventory.fonts) ? inventory.fonts.length : null;
+  const pages = record.format === 'pptx' ? inventory.slideCount : inventory.worksheets?.length;
+  const fontsCount = inventory.fonts?.length;
   panel.innerHTML = `${heading}
-    <div class="document-stats"><div><strong>${issues.length}</strong><span>检查发现</span></div><div><strong>${fixable.length}</strong><span>可选字体修复</span></div><div><strong>${pages ?? '—'}</strong><span>${record.format === 'pptx' ? '张幻灯片' : '个工作表'}</span></div><div><strong>${fontsCount ?? '—'}</strong><span title="包括主题中的备用声明，不代表都出现在可见文字中">声明字体</span></div></div>
-    <div class="validation-note">${icon('info')}<p><strong>尚未在 Windows Office 实际验证</strong><span>这次检查基于文档结构，最终版式和功能仍需在目标电脑核对。</span></p></div>
-    ${report.repairBlocked ? `<div class="blocked-notice">${icon('shield')}<div><strong>此文件不适合自动修复</strong><p>为保护文件完整性，已关闭修复功能。请查看下方发现，并在原始软件中处理。</p></div></div>` : ''}
+    ${renderSummary(record, fixable, manual)}
+    <section class="repair-panel" ${groups.length ? '' : 'hidden'} aria-labelledby="repair-title">
+      <div class="repair-panel-heading"><div><h3 id="repair-title">选择要替换的字体</h3><p>只勾选遇到问题的字体。修改会保存到新文件。</p></div></div>
+      <div class="font-choice-list">${renderChoices(record, groups)}</div>
+      <div class="repair-selection"><span id="selection-summary"></span><div><button id="select-fixes" class="text-button" ${!fixable.length || busy ? 'disabled' : ''}>全选</button><button id="clear-fixes" class="subtle-button" disabled>取消选择</button></div></div>
+      <p id="font-caution" class="font-caution"></p>
+      <button id="repair-file" class="button primary repair-button" disabled>${record.status === 'repairing' ? '<span class="spinner small light"></span> 正在生成副本…' : `${icon('download')} 生成并下载副本`}</button>
+      <div id="repair-result"></div>
+    </section>
     ${renderFontSettings(record)}
-    <div class="findings-toolbar"><h3>检查发现</h3><div class="filter-tabs" role="group" aria-label="筛选检查发现">${[['all', '全部', issues.length], ['error', '需处理', counts.error], ['warning', '需复核', counts.warning], ['info', '提示', counts.info]].map(([value, label, count]) => `<button data-filter="${value}" class="filter-button ${state.filter === value ? 'selected' : ''}" aria-pressed="${state.filter === value}">${label}<span>${count}</span></button>`).join('')}</div></div>
-    <div id="issue-list" class="issue-list"></div>
-    <div class="repair-panel"><div class="repair-panel-heading"><span class="repair-symbol">${icon('sparkle')}</span><div><h3>生成可编辑副本</h3><p>仅应用你确认的字体替换，保留文档内容和其他对象。</p></div></div><p class="font-caution">字体替换可能改变换行和排版。建议的字体也需要目标电脑具备，请确认后再选择。</p><div class="repair-selection"><span id="selection-summary"></span><div><button id="select-fixes" class="text-button" ${!fixable.length || isDocumentBusy(record) ? 'disabled' : ''}>选择全部字体建议</button><button id="clear-fixes" class="subtle-button" ${!record.selected.size || isDocumentBusy(record) ? 'disabled' : ''}>取消选择</button></div></div><button id="repair-file" class="button primary repair-button" ${!record.selected.size || report.repairBlocked || isDocumentBusy(record) ? 'disabled' : ''}>${record.status === 'repairing' ? '<span class="spinner small light"></span> 正在生成副本…' : `${icon('sparkle')} 生成修复副本`}</button>${!fixable.length ? `<p class="no-repair-note">${report.repairBlocked ? '当前文件已禁止自动修复。' : '当前没有可自动修复的字体建议；仍可导出检查报告。'}</p>` : ''}<div id="repair-result"></div></div>
-    <div class="report-export"><div><h3>带上这份检查记录</h3><p>报告包含发现、位置与修改记录，便于复核和交接。</p></div><div><button class="button secondary compact" id="download-html">${icon('download')} HTML 报告</button><button class="button secondary compact" id="download-json">JSON</button></div></div>
-    <details class="technical-details"><summary>文件校验与检查说明</summary><dl><div><dt>原文件 SHA-256</dt><dd class="hash">${esc(report.sha256 || '未提供')}</dd></div><div><dt>工具版本</dt><dd>${esc(report.toolVersion || '开发版')}</dd></div><div><dt>结构检查</dt><dd>${report.validation?.packageChecked ? '已执行' : '未完整执行'}</dd></div></dl>${(report.validation?.notes || []).length ? `<ul>${report.validation.notes.map((note) => `<li>${esc(note)}</li>`).join('')}</ul>` : ''}</details>`;
+    <details class="findings-details" ${record.findingsOpen ? 'open' : ''}><summary>查看全部检查结果 <span>${issues.length} 项</span></summary>
+      <div class="findings-toolbar"><div class="filter-tabs" role="group" aria-label="筛选检查发现">${[['all', '全部', issues.length], ['error', '需处理', counts.error], ['warning', '需复核', counts.warning], ['info', '提示', counts.info]].map(([value, label, count]) => `<button data-filter="${value}" class="filter-button ${state.filter === value ? 'selected' : ''}" aria-pressed="${state.filter === value}">${label}<span>${count}</span></button>`).join('')}</div></div>
+      <div id="issue-list" class="issue-list"></div>
+    </details>
+    <details class="report-details" ${record.exportOpen ? 'open' : ''}><summary>下载检查报告</summary>
+      <div class="report-export"><div><p>报告包含核对建议和已采用的修改，可另存后查看或打印。</p></div><div><button class="button secondary compact" id="download-html">${icon('download')} 下载可阅读的报告</button><button class="button secondary compact" id="download-json">下载 JSON</button></div></div>
+      <details class="technical-details"><summary>文件信息与检查范围</summary><dl><div><dt>${record.format === 'pptx' ? '幻灯片' : '工作表'} / 声明字体</dt><dd>${pages ?? '—'} / ${fontsCount ?? '—'}</dd></div><div><dt>原文件 SHA-256</dt><dd class="hash">${esc(report.sha256 || '未提供')}</dd></div><div><dt>工具版本</dt><dd>${esc(report.toolVersion || '开发版')}</dd></div><div><dt>结构检查</dt><dd>${report.validation?.packageChecked ? '已执行' : '未完整执行'}</dd></div></dl>${(report.validation?.notes || []).length ? `<ul>${report.validation.notes.map(note => `<li>${esc(note)}</li>`).join('')}</ul>` : ''}</details>
+    </details>`;
+  const findings = panel.querySelector('.findings-details');
+  const exports = panel.querySelector('.report-details');
+  findings.addEventListener('toggle', () => { if (findings.isConnected) record.findingsOpen = findings.open; });
+  exports.addEventListener('toggle', () => { if (exports.isConnected) record.exportOpen = exports.open; });
+  panel.querySelector('#open-findings')?.addEventListener('click', () => {
+    findings.open = true;
+    panel.querySelector(`[data-filter="${report.repairBlocked ? 'error' : 'warning'}"]`).click();
+    findings.querySelector('summary').focus();
+  });
   panel.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => {
     state.filter = button.dataset.filter;
     panel.querySelectorAll('[data-filter]').forEach((item) => { item.classList.toggle('selected', item === button); item.setAttribute('aria-pressed', String(item === button)); });
     renderIssues(record);
   }));
-  panel.querySelector('#select-fixes').addEventListener('click', () => {
-    record.selected = new Set(fixable.map((issue) => issue.id)); record.repaired = null;
-    renderIssues(record); updateSelection(record); announce(`已选择 ${record.selected.size} 项字体建议，点击生成按钮才会修改副本。`);
-  });
-  panel.querySelector('#clear-fixes').addEventListener('click', () => { record.selected.clear(); record.repaired = null; renderIssues(record); updateSelection(record); });
+  function select(ids, checked) {
+    for (const id of ids) {
+      if (checked) record.selected.add(id); else record.selected.delete(id);
+    }
+    record.repaired = null;
+    record.repairError = null;
+    updateSelection(record, groups);
+    renderQueue();
+  }
+  panel.querySelectorAll('[data-issue-id]').forEach(check => check.addEventListener('change', () => select([check.dataset.issueId], check.checked)));
+  panel.querySelectorAll('[data-font-group]').forEach(check => check.addEventListener('change', () => select(groups[Number(check.dataset.fontGroup)].map(i => i.id), check.checked)));
+  panel.querySelector('#select-fixes').addEventListener('click', () => select(fixable.map(i => i.id), true));
+  panel.querySelector('#clear-fixes').addEventListener('click', () => select([...record.selected], false));
   panel.querySelector('#repair-file').addEventListener('click', () => repair(record));
   panel.querySelector('#download-json').addEventListener('click', () => {
     downloadBlob(JSON.stringify(exportPayload(record), null, 2), `${record.name}.兼容报告.json`, 'application/json;charset=utf-8');
@@ -311,7 +460,7 @@ function renderDocument() {
   panel.querySelector('#download-html').disabled = isDocumentBusy(record);
   panel.querySelector('#download-json').disabled = isDocumentBusy(record);
   renderIssues(record);
-  updateSelection(record);
+  updateSelection(record, groups);
 }
 
 function renderIssues(record) {
@@ -320,46 +469,81 @@ function renderIssues(record) {
     .sort((a, b) => (order[a.severity] ?? 2) - (order[b.severity] ?? 2));
   const list = document.querySelector('#issue-list');
   list.innerHTML = issues.length ? issues.map((issue) => {
-    const fixable = !record.report.repairBlocked && issue.fixable && issue.fix?.kind === 'font-replace';
     const severity = ['error', 'warning', 'info'].includes(issue.severity) ? issue.severity : 'info';
-    return `<article class="issue-card ${severity}"><div class="issue-main"><span class="issue-status">${icon(severity === 'info' ? 'info' : 'warning')}</span><div class="issue-content"><div class="issue-title"><h4>${esc(issue.title)}</h4><span class="severity-label">${({ error: '需处理', warning: '需复核', info: '提示' })[severity]}</span></div><p class="issue-description">${esc(issue.description)}</p><p class="issue-location"><span>位置</span>${esc(issue.location || issue.part || '文件整体')}</p>${fixable ? `<label class="fix-option"><input type="checkbox" data-issue-id="${esc(issue.id)}" ${record.selected.has(issue.id) ? 'checked' : ''} ${isDocumentBusy(record) ? 'disabled' : ''}><span><span class="font-map"><strong>${esc(issue.fix.from)}</strong>${icon('arrow')}<strong>${esc(issue.fix.to)}</strong></span><small>选择后应用到副本 · 字体变化可能影响排版</small></span></label>` : ''}${issue.recommendation && !fixable ? `<p class="issue-recommendation"><span>建议</span>${esc(issue.recommendation)}</p>` : ''}${issue.evidence || issue.part ? `<details class="issue-detail"><summary>查看检查依据</summary>${issue.evidence ? `<p>${esc(issue.evidence)}</p>` : ''}${issue.part ? `<code>${esc(issue.part)}</code>` : ''}<span class="issue-code">${esc(issue.code)}</span></details>` : ''}</div></div></article>`;
+    return `<article class="issue-card ${severity}"><div class="issue-main"><span class="issue-status">${icon(severity === 'info' ? 'info' : 'warning')}</span><div class="issue-content"><div class="issue-title"><h4>${esc(issue.title)}</h4><span class="severity-label">${({ error: '需处理', warning: '需复核', info: '提示' })[severity]}</span></div><p class="issue-description">${esc(issue.description)}</p><p class="issue-location"><span>位置</span>${esc(issue.location || issue.part || '文件整体')}</p>${issue.recommendation ? `<p class="issue-recommendation"><span>建议</span>${esc(issue.recommendation)}</p>` : ''}${issue.evidence || issue.part ? `<details class="issue-detail"><summary>查看检查依据</summary>${issue.evidence ? `<p>${esc(issue.evidence)}</p>` : ''}${issue.part ? `<code>${esc(issue.part)}</code>` : ''}<span class="issue-code">${esc(issue.code)}</span></details>` : ''}</div></div></article>`;
   }).join('') : `<div class="no-issues">${icon('check')}<h4>${state.filter === 'all' ? '没有发现当前规则覆盖的风险' : '这个级别没有检查发现'}</h4><p>${state.filter === 'all' ? '这不代表已保证兼容。交接前请在目标 Windows 电脑验证。' : '可以切换筛选，查看其他发现。'}</p></div>`;
-  list.querySelectorAll('[data-issue-id]').forEach((input) => input.addEventListener('change', () => {
-    if (input.checked) record.selected.add(input.dataset.issueId); else record.selected.delete(input.dataset.issueId);
-    record.repaired = null; updateSelection(record);
-  }));
 }
 
-function updateSelection(record) {
+function updateSelection(record, groups) {
+  const panel = document.querySelector('#document-panel');
+  for (const input of panel.querySelectorAll('[data-issue-id]')) input.checked = record.selected.has(input.dataset.issueId);
+  for (const input of panel.querySelectorAll('[data-font-group]')) {
+    const group = groups[Number(input.dataset.fontGroup)];
+    const count = group.filter(issue => record.selected.has(issue.id)).length;
+    input.checked = count === group.length;
+    input.indeterminate = count > 0 && count < group.length;
+  }
   const summary = document.querySelector('#selection-summary');
   if (!summary) return;
-  summary.innerHTML = `已选择 <strong>${record.selected.size}</strong> 项 / 共 ${fixableIssues(record).length} 项建议`;
+  const selected = fixableIssues(record).filter(issue => record.selected.has(issue.id));
+  let caution = selected.length ? '下载后，在 Windows 对照原件检查换行和排版。' : '';
+  if (selected.some(issue => issue.fix.affectsDefaultFont)) {
+    caution = '已选择替换工作簿默认字体。实际列宽、自动行高和打印分页可能变化，请在下载后对比打印预览。';
+  } else if (selected.some(issue => issue.fix.affectsWrappedRows)) {
+    caution = '已选字体用于自动换行、自动行高的单元格。请在下载后对比打印预览的总页数和每页首末行。';
+  }
+  document.querySelector('#font-caution').textContent = caution;
+  document.querySelector('#font-caution').hidden = !caution;
+  summary.innerHTML = `已选 <strong>${record.selected.size}</strong> / ${fixableIssues(record).length} 处替换`;
   document.querySelector('#repair-file').disabled = !record.selected.size || record.report.repairBlocked || isDocumentBusy(record);
   document.querySelector('#clear-fixes').disabled = !record.selected.size || isDocumentBusy(record);
+  document.querySelector('#select-fixes').disabled = record.selected.size === fixableIssues(record).length || isDocumentBusy(record);
   const result = document.querySelector('#repair-result');
-  if (!record.repaired) { result.innerHTML = ''; return; }
+  document.querySelector('#repair-file').hidden = !!record.repaired;
+  if (!record.repaired) {
+    result.innerHTML = record.repairError ? `<p class="font-settings-error" role="alert">${esc(record.repairError)}</p>` : '';
+    return;
+  }
   const total = (record.repaired.changes || []).reduce((sum, change) => sum + (change.count || 0), 0);
   const unresolved = record.repaired.report?.issues?.length || 0;
-  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>记录了 ${record.repaired.changes?.length || 0} 项修改，共 ${total} 处替换。复查仍有 ${unresolved} 项发现，请查看报告并在 Windows 上验证。</p><p class="repaired-name">${esc(record.repaired.fileName)}</p><button class="button success" id="download-repaired">${icon('download')} 下载修复副本</button><details class="changes-details"><summary>查看本次修改记录</summary><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
+  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>替换了 ${total} 处字体。请在浏览器的下载记录中打开副本，用 Windows ${record.format === 'pptx' ? 'PowerPoint 试播' : 'Excel 检查打印预览'}。</p><p class="repaired-name">${esc(safeFileName(record.repaired.fileName))}</p><button class="button success" id="download-repaired">${icon('download')} 再次下载副本</button><p class="font-settings-error" id="copy-download-error" role="status" ${record.downloadError ? '' : 'hidden'}>${esc(record.downloadError || '')}</p><details class="changes-details"><summary>查看修改记录和复查结果</summary><p>复查还有 ${unresolved} 项提示，详情见检查报告。</p><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
   document.querySelector('#download-repaired').addEventListener('click', () => {
-    downloadBlob(record.repaired.bytes, safeFileName(record.repaired.fileName), record.format === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    toast('修复副本已准备下载。请在目标 Windows 软件中复核。');
+    downloadCopy(record);
   });
+}
+
+function downloadCopy(record) {
+  const mime = record.format === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  record.downloadError = null;
+  try {
+    downloadBlob(record.repaired.bytes, safeFileName(record.repaired.fileName), mime);
+    toast(`已请求下载「${safeFileName(record.repaired.fileName)}」。若没有看到文件，可再次下载。`);
+  } catch {
+    record.downloadError = '副本已生成，下载未能启动。请点击“再次下载副本”重试。';
+    toast(record.downloadError, 'error');
+  }
+  const error = document.querySelector('#copy-download-error');
+  if (error && activeRecord() === record) {
+    error.textContent = record.downloadError || '';
+    error.hidden = !record.downloadError;
+  }
 }
 
 async function repair(record) {
   if (!record.selected.size || record.report.repairBlocked || isDocumentBusy(record)) return;
   record.status = 'repairing';
+  record.repairError = null;
   renderRecord(record);
   try {
     const bytes = new Uint8Array(await record.file.arrayBuffer());
     record.repaired = await request('repair', { bytes, fileName: record.name, options: { ...record.options, selectedIssueIds: [...record.selected] } }, [bytes.buffer]);
     record.status = 'ready';
-    announce(`${record.name} 的修复副本已生成，可以下载。原文件保持不变。`);
-    toast('副本已生成，原文件保持不变。');
+    announce(`${record.name} 的可编辑副本已生成。`);
+    downloadCopy(record);
   } catch (error) {
     record.status = 'ready'; record.repaired = null;
-    toast(`没有生成副本：${error.message}`, 'error');
+    record.repairError = `没有生成副本：${error.message}`;
+    toast(record.repairError, 'error');
     announce(`修复未完成：${error.message}`);
   }
   renderRecord(record);
@@ -377,7 +561,7 @@ function renderFontSettings(record) {
   const mappings = Object.entries(record.options?.fontMappings || {});
   const disabled = isDocumentBusy(record) || record.report.repairBlocked;
   return `<details class="font-settings" id="font-settings" ${record.advancedOpen ? 'open' : ''}>
-    <summary>字体设置：目标名单与自定义替换 <span>${mappings.length ? `${mappings.length} 条当前文件规则` : '按需设置'}</span></summary>
+    <summary>更多字体设置 <span>${mappings.length ? `${mappings.length} 条当前文件规则` : '目标电脑字体 · 自定义替换'}</span></summary>
     <div class="font-settings-body">
       ${renderFontList(record, isDocumentBusy(record))}
       <h4>自定义字体替换</h4><p>规则仅对当前文件生效。目标字体会影响字宽和换行。没有目标名单时，下方列出常见候选字体。</p>
@@ -397,7 +581,7 @@ function renderFontSettings(record) {
 function bindFontSettings(record, panel) {
   bindFontList(record, panel, changes => reanalyzeWithOptions(record, changes));
   const details = panel.querySelector('#font-settings');
-  details.addEventListener('toggle', () => { record.advancedOpen = details.open; });
+  details.addEventListener('toggle', () => { if (details.isConnected) record.advancedOpen = details.open; });
   panel.querySelector('#font-rule-form').addEventListener('submit', (event) => {
     event.preventDefault();
     if (isDocumentBusy(record) || record.report.repairBlocked) return;
@@ -431,6 +615,7 @@ async function reanalyzeWithOptions(record, readChanges) {
     record.report = report;
     record.options = { ...options, ...report.analysisOptions };
     record.repaired = null;
+    record.repairError = null;
     record.selected.clear();
     if (record.id === state.activeId) state.filter = 'all';
     announce(`${record.name} 已按当前字体规则重新检查。尚未选择或应用任何替换。`);
