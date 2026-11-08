@@ -6,7 +6,7 @@ import { normalizeFontOptions } from './fonts.js';
 
 import { compareFontList } from './target-fonts.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '1.0.0';
 const mainTypes = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml',
@@ -199,6 +199,8 @@ export async function analyzeOffice(bytes, fileName, options = {}) {
 
 export async function repairOffice(bytes, fileName, options = {}) {
   const ctx = prepare(bytes, fileName, options);
+  // Keep exact XML targets private to this repair and the freshly parsed input.
+  ctx.fontTargets = new Map();
   const beforeReport = await buildReport(ctx);
   if (beforeReport.repairBlocked) throw new Error('此文件存在签名、宏、结构异常或不支持的格式，不能自动修复。请查看报告。');
   const selected = new Set(options.selectedIssueIds || []);
@@ -207,17 +209,20 @@ export async function repairOffice(bytes, fileName, options = {}) {
   for (const id of selected) {
     const issue = beforeReport.issues.find(i => i.id === id);
     if (!issue?.fixable || issue.fix?.kind !== 'font-replace') throw new Error('选择的修复项目已失效或不支持，请重新检查文件。');
-    fixes.push({ ...issue.fix, issueId: issue.id, part: issue.part, printReview: issue.fix.affectsDefaultFont || issue.fix.affectsWrappedRows ? issue.description + ' ' + issue.recommendation : undefined });
+    const printReview = issue.fix.affectsDefaultFont || issue.fix.affectsWrappedRows || issue.fix.affectsCellFit || issue.fix.layoutUnverified;
+    fixes.push({ ...issue.fix, issueId: issue.id, part: issue.part, location: issue.location,
+      printReview: printReview ? issue.description + ' ' + issue.recommendation : undefined });
   }
   const entries = new Map(ctx.entries), changes = [];
   for (const part of new Set(fixes.map(f => f.part))) {
     const partFixes = fixes.filter(f => f.part === part);
-    const { text, counts } = replaceFontAttributes(ctx.texts.get(part), ctx.xml.get(part), partFixes);
+    const { text, counts } = replaceFontAttributes(ctx.texts.get(part), ctx.xml.get(part), partFixes, ctx.fontTargets);
     parseXml(text, part);
     for (const fix of partFixes) {
       const count = counts.get(fix.issueId) || 0;
       if (!count) throw new Error(`未定位到 ${part} 的目标字体；为保护内容，未生成修复副本。`);
       const change = { issueId: fix.issueId, part, kind: fix.kind, before: fix.from, after: fix.to, count };
+      if (fix.layoutScope) change.location = fix.location;
       if (fix.printReview) change.printReview = fix.printReview;
       changes.push(change);
     }

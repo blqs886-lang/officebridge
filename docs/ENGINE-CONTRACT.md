@@ -10,16 +10,28 @@ Report fields: `schemaVersion: 1`, `toolVersion`, `fileName`, `format: 'pptx'|'x
 
 Issue: `{ id, code, severity: 'warning'|'info'|'error', title, description,
 location: string, part: string, fixable: boolean, defaultSelected: boolean,
-fix?: { kind: 'font-replace', from: string, to: string, scope: string, affectsDefaultFont?: true, affectsWrappedRows?: true },
-evidence?: string, recommendation?: string }`.
+fix?: { kind: 'font-replace', from: string, to: string, scope: string, layoutScope?: string,
+affectsDefaultFont?: true, affectsWrappedRows?: true, affectsCellFit?: true, layoutUnverified?: true },
+layoutReview?: string, evidence?: string, recommendation?: string }`.
 
-Change: `{ issueId, part, kind, before, after, count, printReview?: string }`. XLSX changes that touch the default font or text in wrapped, automatically sized rows carry their print-preview guidance into the post-repair report.
+Change: `{ issueId, part, kind, before, after, count, location?: string, printReview?: string }`.
+A split choice records its human-readable location in the change log. An XLSX
+selection that touches a recognized layout risk carries its print-preview
+guidance into the post-repair report. A user can compare locally exported proofs
+to check the actual page count and appearance.
 
 Format scanner exports `scanPptx(context)` / `scanXlsx(context)` returning
 `{ issues, inventory }`. Context is `{ entries: Map<string, Uint8Array>,
 xml: Map<string, Document>, texts: Map<string, string>, options }`.
 Options: `{ fontProfile: 'windows-office', fontMappings?: object, targetFonts?: string[] }`. With a target list, reports include only the count and document family matches under `inventory.targetFontComparison`. The caller keeps the list for repair.
-Scanners only inspect. Use predictable IDs from code + part + index; avoid random IDs.
+Scanners only inspect. Issue IDs use the code, part and family ordinal. When a
+single source font in one namespace and part has separately selectable groups,
+all its choices retain that ordinal and append their own `fix.layoutScope`.
+The old whole-family ID no longer selects a subset. Reanalysis during repair
+fills a private `context.fontTargets` map from those scoped IDs to exact DOM
+elements. A shared declaration belongs to one group, including any layout risks
+in all its known uses. Callers select IDs from the current analysis. A missing or
+overlapping target stops the repair.
 All UI copy in Chinese. English code identifiers. No numeric compatibility score.
 
 Shared `src/engine/xml.js` exports `NS`, `elements(node, ns, localName)`,

@@ -8,7 +8,7 @@ export function unsupportedFileMessage(name) {
     xls: '请用 Excel 打开，把副本另存为 Excel 工作簿（.xlsx），再来检查。',
     pptm: '这份演示含宏或使用了启用宏的格式。请保留原件，在目标电脑的 PowerPoint 中核对。',
     xlsm: '这份表格使用了启用宏的格式。请保留原件，在目标电脑的 Excel 中核对。',
-    pdf: 'PDF 可以用来对照排版。要检查可编辑的内容，请选择导出这份 PDF 时使用的 PPTX 或 XLSX 原稿。',
+    pdf: 'PDF 可以在页面下方的“对照两份 PDF 的页数和排版”里打开。要检查可编辑的内容，请选择导出这份 PDF 时使用的 PPTX 或 XLSX 原稿。',
     csv: '如果中文显示正确，请用 Excel 将表格另存为 .xlsx 后再来检查。若打开时已经乱码，请先在 Excel 导入时核对文本编码。',
   };
   const message = Object.hasOwn(hints, extension) ? hints[extension] : '请选择 PowerPoint 演示文稿（.pptx）或 Excel 工作簿（.xlsx）。';

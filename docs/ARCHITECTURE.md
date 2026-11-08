@@ -1,6 +1,6 @@
 # 架构与保真边界
 
-OfficeBridge v0.3.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；没有调用 Office 排版、重算或媒体播放引擎。
+OfficeBridge v1.0.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；没有调用 Office 排版、重算或媒体播放引擎。
 
 ## 数据流
 
@@ -22,6 +22,7 @@ OfficeBridge v0.3.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js 
 | 位置 | 职责 |
 | --- | --- |
 | `src/main.js`、`src/style.css` | 文件队列、报告展示、字体建议选择与下载 |
+| `src/ui/pdf-compare.js` | 本机读取两份 PDF，在独立 Worker 解析并按相同物理比例渲染当前页，比较页数、纸张和预览像素 |
 | `src/ui/worker.js` | 在浏览器 Worker 内执行检查与修复 |
 | `src/ui/reports.js` | 报告展示与导出；将文档提供的字符串作为数据处理 |
 | `src/engine/archive.js` | 校验 ZIP 元数据、拒绝不安全路径及资源超限、解压与打包 |
@@ -33,7 +34,7 @@ OfficeBridge v0.3.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js 
 | `scripts/build-portable.mjs` | 将构建产物内联为独立 HTML，限制网络连接 |
 | `scripts/verify-windows.ps1` | 可选的 Windows 桌面 Office 实际打开检查，独立于浏览器报告 |
 
-数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v0.3.0 的主要目标是 Windows Office 常见字体环境；可按用户导入的目标名单筛选建议。完整名单留在当前文件的会话中。
+数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v1.0.0 的主要目标是 Windows Office 常见字体环境；可按用户导入的目标名单筛选建议。完整名单留在当前文件的会话中。
 
 ## 修改哪些内容
 

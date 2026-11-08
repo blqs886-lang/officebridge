@@ -6,6 +6,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dependencies = [
   ['fflate', 'LICENSE', 'Archive compression and decompression, included in the browser app.'],
   ['@xmldom/xmldom', 'LICENSE', 'XML parsing, included in the browser app.'],
+  ['pdfjs-dist', 'LICENSE', 'Mozilla PDF.js renders locally selected PDF proofs in the browser. Distributed under the Apache License 2.0.'],
   ['vite', 'LICENSE.md', 'Build tooling and generated browser helpers. The full upstream notice is retained.'],
 ];
 let output = '# Third-party notices\n\nOfficeBridge is MIT licensed. The following notices cover the runtime libraries and build helpers distributed with the portable app. Development dependencies retain their licenses in their respective packages.\n\nNo Microsoft, Apple or other proprietary font binaries are distributed. Mentioning a font name does not grant a font license or install it.\n';

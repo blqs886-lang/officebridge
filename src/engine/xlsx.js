@@ -130,6 +130,29 @@ function cellPosition(ref) {
   return match ? { col: columnIndex(match[1]), row: Number(match[2]) } : null;
 }
 
+function implicitCellReferences(doc) {
+  const inferred = new Map();
+  let rowNumber = 0;
+  for (const row of children(first(doc.documentElement, NS.s, 'sheetData'), NS.s, 'row')) {
+    rowNumber = row.hasAttribute('r') ? styleIndex(row, 'r') : rowNumber + 1;
+    let column = 0;
+    for (const cell of children(row, NS.s, 'c')) {
+      if (cell.hasAttribute('r')) {
+        column = cellPosition(attribute(cell, 'r'))?.col ?? NaN;
+        continue;
+      }
+      column++;
+      if (!Number.isInteger(column) || column > 16384 || !Number.isInteger(rowNumber) || rowNumber < 1 || rowNumber > 1048576) continue;
+      let letters = '';
+      for (let n = column; n > 0; n = Math.floor((n - 1) / 26)) {
+        letters = String.fromCharCode(65 + (n - 1) % 26) + letters;
+      }
+      inferred.set(cell, letters + rowNumber);
+    }
+  }
+  return inferred;
+}
+
 function mergedRanges(doc) {
   return elements(doc, NS.s, 'mergeCell').map(node => {
     const [start, end = start] = attribute(node, 'ref').split(':').map(cellPosition);
@@ -229,24 +252,65 @@ function scanOtherFormulas(ctx, add) {
   }
 }
 
-function fontDeclarations(xml, font) {
-  const names = new Set([first(font, NS.s, 'name')]);
-  const scheme = attribute(first(font, NS.s, 'scheme'), 'val');
-  if (!['major', 'minor'].includes(scheme)) return names;
+function workbookThemeFonts(xml) {
   const rels = xml.get('xl/_rels/workbook.xml.rels');
   const theme = elements(rels, NS.rel, 'Relationship').find(rel =>
     attribute(rel, 'Type') === NS.r + '/theme' && attribute(rel, 'TargetMode') !== 'External');
-  if (!theme) return names;
+  if (!theme) return null;
   const root = xml.get(resolvePart('xl/workbook.xml', attribute(theme, 'Target')))?.documentElement;
-  const fonts = first(first(root, NS.a, 'themeElements'), NS.a, 'fontScheme');
-  const family = first(fonts, NS.a, scheme + 'Font');
+  return first(first(root, NS.a, 'themeElements'), NS.a, 'fontScheme');
+}
+
+function fontDeclarations(themeFonts, font) {
+  const names = new Set([first(font, NS.s, 'name')]);
+  const scheme = attribute(first(font, NS.s, 'scheme'), 'val');
+  if (!['major', 'minor'].includes(scheme)) return names;
+  const family = first(themeFonts, NS.a, scheme + 'Font');
   // The primary Latin face supplies digit metrics for column widths. Supplemental script faces
   // and other theme parts alone do not establish the workbook's default column-width font.
   names.add(first(family, NS.a, 'latin'));
   return names;
 }
 
-function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, wrappedFontLocations) {
+function addFontChoices(ctx, add, part, group, advice, layoutLimited) {
+  const split = group.layouts.size > 1;
+  for (const [layoutScope, bucket] of group.layouts) {
+    const { affectsDefaultFont, wrappedLocation, constrainedLocation, themeLocation } = bucket;
+    let effect = '替换字体可能改变字宽、换行与图表布局，需要检查预览。';
+    if (affectsDefaultFont) effect = '这项替换涉及工作簿默认字体。Excel 可能据此重新计算实际列宽、自动行高和打印分页。';
+    else if (wrappedLocation) effect = '这个字体用于自动换行、自动行高的单元格。换字体后文字可能多占或少占一行，改变后续的打印分页。';
+    else if (constrainedLocation) effect = '有些单元格的文字受列宽、行高或文字显示方式限制。换字体后请在对应位置核对可见文字与换行。';
+    if (themeLocation) effect += ' 此主题字体可能参与换行文字的显示，具体取决于文字语言和 Excel 的字体选择。';
+    if (layoutLimited) effect += ' 部分单元格的文字与行列尺寸需手动核对。';
+    const layoutLocations = [
+      affectsDefaultFont && '工作簿默认字体',
+      wrappedLocation && ('自动行高 · ' + wrappedLocation),
+      constrainedLocation && ('受限单元格 · ' + constrainedLocation),
+      themeLocation && ('换行文字的主题 · ' + themeLocation),
+    ].filter(Boolean);
+    const examples = [
+      wrappedLocation && ('自动换行单元格示例：' + wrappedLocation + '。'),
+      constrainedLocation && ('需要核对可见文字的单元格示例：' + constrainedLocation + '。'),
+      themeLocation && ('主题引用示例：' + themeLocation + '。'),
+    ].filter(Boolean).join('');
+    const id = add('FONT_REPLACEMENT_AVAILABLE', part, {
+      severity: 'warning', title: `字体「${group.name}」可选择替换`,
+      ...(split && { location: layoutLocations.join(' / ') || '其余同名的字体位置' }),
+      description: advice.reason + ' ' + effect,
+      evidence: `本项涉及 ${bucket.count} 处字体声明。` + examples,
+      recommendation: layoutLocations.length || layoutLimited
+        ? `原件在目标 Excel 中打印正常时，可以保留原字体。选择替换后，请${PRINT_COMPARISON}`
+        : `确认目标电脑有「${advice.to}」后，再勾选替换并核对实际排版。`,
+      fixable: true, fix: { kind: 'font-replace', from: group.name, to: advice.to, scope: group.scope,
+        ...(split && { layoutScope }), ...(affectsDefaultFont && { affectsDefaultFont: true }),
+        ...(wrappedLocation && { affectsWrappedRows: true }), ...(constrainedLocation && { affectsCellFit: true }),
+        ...((layoutLimited || themeLocation) && { layoutUnverified: true }) },
+    });
+    if (split && ctx.fontTargets) ctx.fontTargets.set(id, bucket.nodes);
+  }
+}
+
+function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, cellFontUse) {
   const fonts = new Map();
   for (const [part, doc] of ctx.xml) {
     if (!part.startsWith('xl/')) continue;
@@ -256,9 +320,16 @@ function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, wrapped
       const name = keyName && attribute(node, keyName);
       if (!name || /^\+(?:mj|mn)-/.test(name)) continue;
       const key = `${node.namespaceURI}\0${name}`;
-      const group = groups.get(key) ?? { name, scope: node.namespaceURI, count: 0, supplemental: 0, symbolSensitive: false };
-      if (defaultNames.has(node)) group.affectsDefaultFont = true;
-      if (wrappedFontLocations.has(node)) group.wrappedLocation ??= wrappedFontLocations.get(node);
+      const group = groups.get(key) ?? { name, scope: node.namespaceURI, count: 0, supplemental: 0, symbolSensitive: false, layouts: new Map() };
+      const affectsDefaultFont = defaultNames.has(node);
+      const wrappedLocation = cellFontUse.autoHeight.get(node);
+      const constrainedLocation = cellFontUse.constrained.get(node);
+      const themeLocation = cellFontUse.uncertainTheme.get(node);
+      const layoutScope = [affectsDefaultFont && 'default', wrappedLocation && 'auto-height', constrainedLocation && 'text-fit', themeLocation && 'theme-fit'].filter(Boolean).join('+') || 'other';
+      const bucket = group.layouts.get(layoutScope) ?? { count: 0, affectsDefaultFont, wrappedLocation, constrainedLocation, themeLocation, nodes: ctx.fontTargets && new Set() };
+      bucket.count++;
+      bucket.nodes?.add(node);
+      group.layouts.set(layoutScope, bucket);
       group.count += 1;
       const richRun = node.localName === 'rFont' ? node.parentNode?.parentNode : null;
       const privateRichText = richRun?.namespaceURI === NS.s && richRun.localName === 'r'
@@ -276,7 +347,8 @@ function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, wrapped
       fonts.set(name, font);
     }
     const supplementalUnknown = [];
-    for (const { name, scope, count, supplemental, symbolSensitive, affectsDefaultFont, wrappedLocation } of groups.values()) {
+    for (const group of groups.values()) {
+      const { name, count, supplemental, symbolSensitive } = group;
       const advice = fontAdvice(name, ctx.options ?? {});
       if (symbolSensitive && (advice || !isKnownFont(name, ctx.options ?? {}))) {
         add('SYMBOL_FONT_REVIEW', part, {
@@ -286,19 +358,7 @@ function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, wrapped
           recommendation: '在目标电脑确认原字体与字符可用，再在原始应用中检查符号的含义和显示。',
         });
       } else if (advice && advice.to !== name && !symbolSensitive) {
-        const layoutEffect = affectsDefaultFont
-          ? '这项替换涉及工作簿默认字体。Excel 可能据此重新计算实际列宽、自动行高和打印分页。'
-          : wrappedLocation ? '这个字体用于自动换行、自动行高的单元格。换字体后文字可能多占或少占一行，改变后续的打印分页。'
-          : '替换字体可能改变字宽、换行与图表布局，需要检查预览。';
-        add('FONT_REPLACEMENT_AVAILABLE', part, {
-          severity: 'warning', title: `字体「${name}」可选择替换`,
-          description: `${advice.reason} ${layoutEffect}`,
-          evidence: `在此部件中发现 ${count} 处字体声明。${wrappedLocation ? '自动换行单元格示例：' + wrappedLocation + '。' : ''}`,
-          recommendation: affectsDefaultFont || wrappedLocation
-            ? `原件在目标 Excel 中打印正常时，可以保留原字体。选择替换后，请${PRINT_COMPARISON}`
-            : `确认目标电脑有「${advice.to}」后，再勾选替换并核对实际排版。`,
-          fixable: true, fix: { kind: 'font-replace', from: name, to: advice.to, scope, ...(affectsDefaultFont && { affectsDefaultFont: true }), ...(wrappedLocation && { affectsWrappedRows: true }) },
-        });
+        addFontChoices(ctx, add, part, group, advice, cellFontUse.layoutLimited);
       } else if (!isKnownFont(name, ctx.options ?? {}) && supplemental === count) {
         supplementalUnknown.push(name);
       } else if (!isKnownFont(name, ctx.options ?? {})) {
@@ -371,20 +431,24 @@ function scanWorkbook(ctx, add, inventory) {
 
 function wrappedTextFonts(source) {
   const runs = children(source, NS.s, 'r');
-  const names = new Set();
+  const names = new Set(), schemes = new Set();
   let usesCellFont = !source || !!first(source, NS.s, 't')?.textContent.trim();
   for (const run of runs) {
     if (!first(run, NS.s, 't')?.textContent.trim()) continue;
     const properties = first(run, NS.s, 'rPr');
     const name = first(properties, NS.s, 'rFont');
+    const scheme = attribute(first(properties, NS.s, 'scheme'), 'val');
+    if (['major', 'minor'].includes(scheme)) schemes.add(scheme);
     if (attribute(name, 'val')) names.add(name);
-    else if (!first(properties, NS.s, 'scheme')) usesCellFont = true;
+    else if (!['major', 'minor'].includes(scheme)) usesCellFont = true;
   }
-  return { names, usesCellFont };
+  return { names, schemes, usesCellFont };
 }
 
-function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privateStyleFonts, wrappedFonts) {
+function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privateStyleFonts, cellFontUse) {
   const cells = elements(doc, NS.s, 'c');
+  const implied = cells.some(cell => !cell.hasAttribute('r')) ? implicitCellReferences(doc) : null;
+  const reference = cell => attribute(cell, 'r', implied?.get(cell) ?? '?');
   const sheet = { name, part, cellCount: cells.length, formulaCount: 0 };
   if (isTrue(attribute(first(doc.documentElement, NS.s, 'sheetProtection'), 'sheet'))) add('WORKSHEET_EDIT_PROTECTED', part, {
     severity: 'info', title: '此工作表已启用单元格保护', location: name,
@@ -405,6 +469,7 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
   const merges = mergedRanges(doc);
   const layoutBudget = cells.length * (columns.length + merges.length);
   const layoutLimited = layoutBudget > 2_000_000;
+  if (layoutLimited) cellFontUse.layoutLimited = true;
   let protectColumnStyles = false;
   const rememberStyle = styleIndex => {
     const xf = styles.xfs[Number(styleIndex)];
@@ -417,11 +482,11 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
     }
   };
   const occupied = new Set(cells.filter(cell => first(cell, NS.s, 'f') || first(cell, NS.s, 'v') || first(cell, NS.s, 'is')).map(cell => {
-    const pos = cellPosition(attribute(cell, 'r'));
+    const pos = cellPosition(reference(cell));
     return pos ? `${pos.row}:${pos.col}` : '';
   }));
   for (const cell of cells) {
-    const ref = attribute(cell, 'r', '?');
+    const ref = reference(cell);
     const formula = first(cell, NS.s, 'f');
     const value = first(cell, NS.s, 'v');
     const raw = value?.textContent?.trim() ?? '';
@@ -471,33 +536,52 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
     if ((!type || type === 'n') && usesZeroPadding(raw, format)) mark('ZERO_PADDED_DISPLAY', ref);
 
     // A deliberately conservative hint, not a renderer or an autofit operation.
-    if (layoutLimited || !text?.trim() || isTrue(attribute(alignment, 'shrinkToFit')) || Number(attribute(alignment, 'textRotation', '0')) !== 0) continue;
-    if (!pos || merges.some(range => pos.col >= range.start.col && pos.col <= range.end.col && pos.row >= range.start.row && pos.row <= range.end.row)) continue;
-    if (col?.hidden || isTrue(attribute(cell.parentNode, 'hidden'))) continue;
+    // Formulas without a cached result may display text after Excel recalculates.
+    if (layoutLimited || (!text?.trim() && !raw && !formula)) continue;
+    if (!pos) { cellFontUse.layoutLimited = true; continue; }
+    if (col?.hidden || isTrue(attribute(row, 'hidden'))) continue;
+    const merged = merges.some(range => pos.col >= range.start.col && pos.col <= range.end.col && pos.row >= range.start.row && pos.row <= range.end.row);
     const wrap = isTrue(attribute(alignment, 'wrapText'));
-    if (wrap && !isTrue(attribute(row, 'customHeight', fixedDefaultHeight))) {
+    const fitSetting = isTrue(attribute(alignment, 'shrinkToFit')) || Number(attribute(alignment, 'textRotation', '0')) !== 0;
+    let likelyClipped = false;
+    if (!formula && !merged && !fitSetting && text?.trim()) {
+      const width = Number.isFinite(col?.width) && col.width > 0 ? col.width : defaultWidth;
+      const units = [...text].reduce((total, character) => total + (character.codePointAt(0) > 0xff ? 2 : 1), 0) * fontSize / 11;
+      if (!wrap) {
+        likelyClipped = units > width * 1.35 && occupied.has(`${pos.row}:${pos.col + 1}`);
+        if (likelyClipped) mark('TEXT_CLIPPING_HEURISTIC', ref);
+      } else if (isTrue(attribute(row, 'customHeight'))) {
+        const height = Number(attribute(row, 'ht'));
+        const lines = Math.max(text.split(/\r?\n/).length, Math.ceil(units / width));
+        if (Number.isFinite(height) && lines * fontSize * 1.2 > height * 1.2) mark('WRAPPED_TEXT_HEIGHT_HEURISTIC', ref);
+      }
+    }
+    if (wrap || fitSetting || likelyClipped) {
+      const constrained = likelyClipped || fitSetting || merged || isTrue(attribute(row, 'customHeight', fixedDefaultHeight));
+      const affected = constrained ? cellFontUse.constrained : cellFontUse.autoHeight;
       const shared = type === 's' ? strings[Number(raw)] : null;
       const used = shared
         ? (shared.wrappedFonts ??= wrappedTextFonts(shared.source))
         : wrappedTextFonts(first(cell, NS.s, 'is'));
+      const location = name + ' · ' + ref;
       const remember = node => {
-        if (node && !wrappedFonts.locations.has(node)) wrappedFonts.locations.set(node, name + ' · ' + ref);
+        if (node && !affected.has(node)) affected.set(node, location);
       };
+      const rememberScheme = scheme => {
+        if (!['minor', 'major'].includes(scheme) || cellFontUse.usedSchemes.has(scheme)) return;
+        cellFontUse.usedSchemes.add(scheme);
+        const family = first(cellFontUse.theme, NS.a, scheme + 'Font');
+        for (const face of elements(family, NS.a, '*')) {
+          if (attribute(face, 'typeface')) cellFontUse.uncertainTheme.set(face, location);
+        }
+      };
+      for (const scheme of used.schemes) rememberScheme(scheme);
       for (const node of used.names) remember(node);
       if (used.usesCellFont && font) {
-        if (!wrappedFonts.byStyle.has(font)) wrappedFonts.byStyle.set(font, fontDeclarations(ctx.xml, font));
-        for (const node of wrappedFonts.byStyle.get(font)) remember(node);
+        if (!cellFontUse.byStyle.has(font)) cellFontUse.byStyle.set(font, fontDeclarations(cellFontUse.theme, font));
+        rememberScheme(attribute(first(font, NS.s, 'scheme'), 'val'));
+        for (const node of cellFontUse.byStyle.get(font)) remember(node);
       }
-    }
-    if (formula) continue;
-    const width = Number.isFinite(col?.width) && col.width > 0 ? col.width : defaultWidth;
-    const units = [...text].reduce((total, character) => total + (character.codePointAt(0) > 0xff ? 2 : 1), 0) * fontSize / 11;
-    if (!wrap) {
-      if (units > width * 1.35 && occupied.has(`${pos.row}:${pos.col + 1}`)) mark('TEXT_CLIPPING_HEURISTIC', ref);
-    } else if (isTrue(attribute(cell.parentNode, 'customHeight'))) {
-      const height = Number(attribute(cell.parentNode, 'ht'));
-      const lines = Math.max(text.split(/\r?\n/).length, Math.ceil(units / width));
-      if (Number.isFinite(height) && lines * fontSize * 1.2 > height * 1.2) mark('WRAPPED_TEXT_HEIGHT_HEURISTIC', ref);
     }
   }
   if (protectColumnStyles) {
@@ -648,24 +732,34 @@ function scanPackageFeatures(ctx, add, inventory) {
 /** Inspect SpreadsheetML without changing formulas, values, styles or dimensions. */
 export function scanXlsx(ctx) {
   const issues = [], fontIssues = [];
-  const counters = new Map();
+  const counters = new Map(), scopedIndices = new Map();
   const add = (code, part, details, list = issues) => {
     const key = `${code}:${part}`;
-    const index = counters.get(key) ?? 0;
-    counters.set(key, index + 1);
-    list.push({ id: `${code}:${part}:${index}`, code, severity: 'info', part, location: part, fixable: false, defaultSelected: false, ...details });
+    // Split choices share the original family ordinal. A saved ID for the next
+    // family must not silently select a different font after upgrading.
+    const family = details.fix?.layoutScope ? JSON.stringify([part, details.fix.scope, details.fix.from]) : null;
+    let index = scopedIndices.get(family);
+    if (index === undefined) {
+      index = counters.get(key) ?? 0;
+      counters.set(key, index + 1);
+      if (family) scopedIndices.set(family, index);
+    }
+    const id = `${code}:${part}:${index}` + (details.fix?.layoutScope ? ':' + details.fix.layoutScope : '');
+    list.push({ id, code, severity: 'info', part, location: part, fixable: false, defaultSelected: false, ...details });
+    return id;
   };
   const inventory = { worksheets: [], formulaCount: 0, fonts: [], chartCount: 0, externalLinks: 0, connectionCount: 0, embeddedObjects: 0, dateSystem: '1900', hasPrintSettings: false };
   const privateStyleFonts = new Set();
   scanWorkbook(ctx, add, inventory);
   const styles = readStyles(ctx.xml);
   const strings = elements(ctx.xml.get('xl/sharedStrings.xml'), NS.s, 'si').map(source => ({ source, text: richText(source) }));
-  const wrappedFonts = { locations: new Map(), byStyle: new Map() };
+  const cellFontUse = { autoHeight: new Map(), constrained: new Map(), byStyle: new Map(), layoutLimited: false,
+    theme: workbookThemeFonts(ctx.xml), usedSchemes: new Set(), uncertainTheme: new Map() };
   const names = worksheetNames(ctx.xml);
   for (const [part, doc] of ctx.xml) if (/^xl\/worksheets\/[^/]+\.xml$/i.test(part)) {
-    scanSheet(ctx, part, doc, names.get(part) ?? part.split('/').at(-1), styles, strings, add, inventory, privateStyleFonts, wrappedFonts);
+    scanSheet(ctx, part, doc, names.get(part) ?? part.split('/').at(-1), styles, strings, add, inventory, privateStyleFonts, cellFontUse);
   }
-  scanFonts(ctx, (code, part, details) => add(code, part, details, fontIssues), inventory, privateStyleFonts, fontDeclarations(ctx.xml, styles.defaultFont), wrappedFonts.locations);
+  scanFonts(ctx, (code, part, details) => add(code, part, details, fontIssues), inventory, privateStyleFonts, fontDeclarations(cellFontUse.theme, styles.defaultFont), cellFontUse);
   scanPackageFeatures(ctx, add, inventory);
   scanOtherFormulas(ctx, add);
   return { issues: [...fontIssues, ...issues], inventory };

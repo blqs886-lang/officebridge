@@ -101,17 +101,32 @@ export function fontAttribute(node) {
 // Token offsets and DOM namespaces together allow changing ONLY the chosen
 // attribute values. Unknown namespaces, whitespace, comments, CDATA, Alternate-
 // Content, formulas and text stay byte-for-byte intact after re-encoding.
-export function replaceFontAttributes(text, doc, fixes) {
+export function replaceFontAttributes(text, doc, fixes, targetsByIssue = new Map()) {
   const nodes = Array.from(doc.getElementsByTagName('*'));
   // XML names may contain non-ASCII characters, even in opaque extensions.
   const tokens = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/[\s\S]*?>|<([^\s/><!?]+)(?:[^>"']|"[^"]*"|'[^']*')*>/gu;
   const attributes = /\s+([^\s=/>]+)\s*=\s*(["'])([\s\S]*?)\2/gu;
   const lookup = new Map();
+  const targeted = new Map();
+  const partialKeys = new Set();
   const counts = new Map();
   for (const fix of fixes) {
     const key = fix.scope + '\0' + fix.from;
     if (lookup.has(key)) throw new Error('修复规则冲突，未写入文件。');
-    lookup.set(key, fix);
+    if (!fix.layoutScope) {
+      if (partialKeys.has(key)) throw new Error('修复范围重叠，未写入文件。');
+      lookup.set(key, fix);
+      continue;
+    }
+    const targets = targetsByIssue.get(fix.issueId);
+    if (!targets?.size) throw new Error('未找到所选的字体位置，未写入文件。');
+    partialKeys.add(key);
+    for (const node of targets) {
+      if (node.ownerDocument !== doc || node.namespaceURI !== fix.scope || node.getAttribute(fontAttribute(node)) !== fix.from || targeted.has(node)) {
+        throw new Error('所选字体的位置或名称不一致，未写入文件。');
+      }
+      targeted.set(node, fix);
+    }
   }
 
   // Append slices from the original once, including all untouched bytes of
@@ -124,7 +139,7 @@ export function replaceFontAttributes(text, doc, fixes) {
     if (!node || node.nodeName !== match[1]) throw new Error('XML 位置核对失败，未写入修复。');
     const key = fontAttribute(node);
     if (!key || !node.hasAttribute(key)) continue;
-    const fix = lookup.get(node.namespaceURI + '\0' + node.getAttribute(key));
+    const fix = targeted.get(node) ?? lookup.get(node.namespaceURI + '\0' + node.getAttribute(key));
     if (!fix) continue;
     for (const attr of match[0].matchAll(attributes)) {
       if (attr[1] !== key) continue;
@@ -136,6 +151,11 @@ export function replaceFontAttributes(text, doc, fixes) {
     }
   }
   if (index !== nodes.length) throw new Error('XML 节点核对失败，未写入修复。');
+  for (const fix of fixes) {
+    if (fix.layoutScope && counts.get(fix.issueId) !== targetsByIssue.get(fix.issueId).size) {
+      throw new Error('所选字体的位置与修改数不一致，未写入文件。');
+    }
+  }
   output.push(text.slice(offset));
   return { text: output.join(''), counts };
 }

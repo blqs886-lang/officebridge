@@ -707,6 +707,155 @@ try {
     await denied.close();
   });
 
+  await test('快捷选择能撤销高影响勾选，下载后原文本框保留原字体', async () => {
+    const sample = await context.newPage();
+    const parts = unzipSync(await fs.readFile(path.join(projectRoot, 'public/examples/officebridge-demo.pptx')));
+    const key = 'ppt/slides/slide1.xml';
+    const before = strFromU8(parts[key]);
+    const box = '<p:sp><p:nvSpPr><p:cNvPr id="90" name="窄框样例"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="650000" cy="300000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr sz="2200"><a:latin typeface="PingFang SC"/></a:rPr><a:t>QA lines</a:t></a:r></a:p></p:txBody></p:sp>';
+    parts[key] = strToU8(before.replace('</p:spTree>', box + '</p:spTree>'));
+    await sample.goto(baseUrl);
+    await sample.locator('#file-input').setInputFiles({ name: '对照稿.pptx', mimeType: 'application/octet-stream', buffer: Buffer.from(zipSync(parts)) });
+    await sample.locator('#select-fixes').click();
+    const all = await sample.locator('[data-issue-id]:checked').count();
+    await sample.locator('#select-lower-risk').click();
+    const kept = await sample.locator('[data-issue-id]:checked').count();
+    assert.ok(kept > 0 && kept < all);
+    assert.match(await sample.locator('.font-choice-list').innerText(), /窄框样例/);
+    const downloaded = await clickDownload('#repair-file', 'layout-choice.pptx', sample);
+    const actual = strFromU8(unzipSync(await fs.readFile(downloaded))[key]);
+    assert.ok(actual.includes(box));
+    assert.ok(actual.includes('typeface="Microsoft YaHei"'));
+    await sample.locator('#compare-result').click();
+    assert.equal(await sample.locator('#pdf-compare').evaluate(el => el.open), true);
+    await sample.close();
+  });
+
+  await test('两份 PDF 本地逐页对照，能区分同页、换行位置变化和缺页', async () => {
+    const sample = await context.newPage();
+    // Generate deterministic print proofs in memory, with no Office dependency.
+    async function proof(pages, offset) {
+      await sample.setContent(`<style>@page{size:210mm 297mm;margin:15mm}body{margin:0}section+section{break-before:page}h1{font:24pt Arial;margin-left:${offset}mm}</style>`
+        + Array.from({ length: pages }, (_, i) => `<section><h1>Row ${i + 1}</h1></section>`).join(''));
+      return sample.pdf({ preferCSSPageSize: true });
+    }
+    const original = await proof(2, 0);
+    const different = await proof(1, 18);
+    await sample.close();
+    const compare = await context.newPage();
+    await compare.goto(baseUrl);
+    await compare.locator('#pdf-compare > summary').click();
+    const attach = (id, name, buffer) => compare.locator('#proof-' + id).setInputFiles({ name, mimeType: 'application/pdf', buffer });
+    const verdict = text => compare.waitForFunction(value => document.querySelector('#proof-verdict')?.innerText.includes(value), text);
+    await attach(0, '原稿.pdf', original);
+    await attach(1, '原稿复核.pdf', original);
+    await verdict('未见明显图像差异');
+    assert.match(await compare.locator('#proof-status').innerText(), /2 页.*2 页/);
+    await attach(1, '位移.pdf', different);
+    await verdict('本页预览有差异');
+    assert.match(await compare.locator('#proof-status').innerText(), /少 1 页/);
+    const normalWidth = (await compare.locator('.proof-paper').first().boundingBox()).width;
+    await compare.locator('#proof-zoom').check();
+    assert.ok((await compare.locator('.proof-paper').first().boundingBox()).width > normalWidth);
+    await compare.locator('#proof-overlay').check();
+    assert.equal(await compare.locator('.proof-paper').nth(1).locator('canvas:visible').getAttribute('aria-label'), 'Windows 预览，差异用玫红色标出');
+    await compare.locator('#proof-next').click();
+    await verdict('只有一份文件');
+    assert.match(await compare.locator('.proof-paper').nth(1).innerText(), /没有这一页/);
+    await compare.locator('#proof-prev').click();
+    await verdict('本页预览有差异');
+    await attach(1, '损坏.pdf', Buffer.from('damaged'));
+    await compare.waitForFunction(() => document.querySelectorAll('.proof-info')[1].textContent.includes('无法读取'));
+    assert.equal(await compare.locator('#proof-view').isVisible(), false);
+    await attach(1, '再选.pdf', original);
+    await verdict('未见明显图像差异');
+    await compare.setViewportSize({ width: 320, height: 740 });
+    assert.ok(await compare.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await compare.locator('#proof-reset').click();
+    assert.equal(await compare.locator('#proof-view').isVisible(), false);
+    assert.equal(await compare.locator('#proof-0').evaluate(input => input.files.length), 0);
+    await compare.close();
+  });
+
+  await test('PDF 缺少图片像素时保留页数，停止给出排版结论，换回正常图片仍可比较', async () => {
+    function imageProof(payload, filter = '', size = 64) {
+      const paint = 'q 150 0 0 150 0 0 cm /im Do Q';
+      const objects = [
+        '<< /Type /Catalog /Pages 2 0 R >>',
+        '<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 150 150] /Contents 4 0 R /Resources << /XObject << /im 5 0 R >> >> >>',
+        `<< /Length ${paint.length} >>\nstream\n${paint}\nendstream`,
+        Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${size} /Height ${size} /ColorSpace /DeviceRGB /BitsPerComponent 8 ${filter} /Length ${payload.length} >>\nstream\n`), payload, Buffer.from('\nendstream')]),
+      ];
+      const chunks = [Buffer.from('%PDF-1.7\n')];
+      let offset = chunks[0].length;
+      const xref = ['0000000000 65535 f '];
+      for (const [index, object] of objects.entries()) {
+        xref.push(String(offset).padStart(10, '0') + ' 00000 n ');
+        const bytes = Buffer.concat([Buffer.from(`${index + 1} 0 obj\n`), Buffer.from(object), Buffer.from('\nendobj\n')]);
+        chunks.push(bytes); offset += bytes.length;
+      }
+      chunks.push(Buffer.from(`xref\n0 ${xref.length}\n${xref.join('\n')}\ntrailer\n<< /Root 1 0 R /Size ${xref.length} >>\nstartxref\n${offset}\n%%EOF\n`));
+      return Buffer.concat(chunks);
+    }
+    // Two valid OpenJPEG JPEG 2000 codestreams for solid 64 × 64 RGB images.
+    // The offline PDF reader omits this decoder. The decoded pages must never
+    // be classified as matching empty canvases.
+    const red = '/0//UQAvAAAAAABAAAAAQAAAAAAAAAAAAAAAQAAAAEAAAAAAAAAAAAADBwEBBwEBBwEB/1IADAAAAAEABQQEAAH/XAATQEBISFBISFBISFBISFBISFD/ZAAlAAFDcmVhdGVkIGJ5IE9wZW5KUEVHIHZlcnNpb24gMi41LjT/kAAKAAAAAAAtAAH/k8+0DAHKv9+AEAiQ34AQCJCAgICAgICAgICAgICAgID/2Q==';
+    const blue = '/0//UQAvAAAAAABAAAAAQAAAAAAAAAAAAAAAQAAAAEAAAAAAAAAAAAADBwEBBwEBBwEB/1IADAAAAAEABQQEAAH/XAATQEBISFBISFBISFBISFBISFD/ZAAlAAFDcmVhdGVkIGJ5IE9wZW5KUEVHIHZlcnNpb24gMi41LjT/kAAKAAAAAAAtAAH/k9+AEAiQ34AQCJDPtAwByr+AgICAgICAgICAgICAgID/2Q==';
+    const compare = await context.newPage();
+    await compare.addInitScript(() => {
+      const Original = window.Worker;
+      window.Worker = class extends Original {
+        postMessage(message, ...rest) {
+          if (window.__stallNextPdf && message?.action === 'GetOperatorList') {
+            window.__stallNextPdf = false;
+            this.stalled = true;
+            return;
+          }
+          return super.postMessage(message, ...rest);
+        }
+        terminate() {
+          if (this.stalled) window.__stalledPdfTerminated = true;
+          return super.terminate();
+        }
+      };
+      const timer = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...rest) => timer(callback,
+        window.__testPdfDeadline && delay === 30000 ? 1500 : delay, ...rest);
+    });
+    await compare.goto(baseUrl);
+    await compare.locator('#pdf-compare > summary').click();
+    const attach = (id, name, buffer) => compare.locator('#proof-' + id).setInputFiles({ name, mimeType: 'application/pdf', buffer });
+    const verdict = text => compare.waitForFunction(value => document.querySelector('#proof-verdict').textContent.includes(value), text);
+    const rawRed = imageProof(Buffer.from([255, 0, 0]), '', 1);
+    await attach(0, '红.pdf', imageProof(Buffer.from(red, 'base64'), '/Filter /JPXDecode'));
+    await attach(1, '蓝.pdf', imageProof(Buffer.from(blue, 'base64'), '/Filter /JPXDecode'));
+    await verdict('无法判断排版差异');
+    assert.match(await compare.locator('#proof-status').innerText(), /1 页.*1 页/);
+    assert.ok(await compare.locator('#proof-overlay-control').isHidden());
+    await attach(0, '普通红.pdf', rawRed);
+    await attach(1, '损坏图片.pdf', imageProof(Buffer.from('broken JPEG'), '/Filter /DCTDecode'));
+    await verdict('无法判断排版差异');
+    await attach(1, '超大图.pdf', imageProof(Buffer.from([0]), '', 8000));
+    await verdict('无法判断排版差异');
+    await attach(1, '普通蓝.pdf', imageProof(Buffer.from([0, 0, 255]), '', 1));
+    await verdict('本页预览有差异');
+    await attach(1, '同一图.pdf', rawRed);
+    await verdict('未见明显图像差异');
+    await compare.evaluate(() => { window.__stallNextPdf = window.__testPdfDeadline = true; });
+    await attach(1, '短暂卡住.pdf', rawRed);
+    await compare.waitForFunction(() => window.__stalledPdfTerminated);
+    const stalled = await compare.locator('.proof-info').allTextContents();
+    assert.equal(stalled.filter(message => message.includes('预览耗时过长')).length, 1);
+    const retry = stalled.findIndex(message => message.includes('预览耗时过长'));
+    assert.ok((await compare.locator('#proof-' + (1 - retry)).evaluate(input => input.files.length)) === 1);
+    await compare.evaluate(() => { window.__testPdfDeadline = false; });
+    await attach(retry, '重试成功.pdf', rawRed);
+    await verdict('未见明显图像差异');
+    await compare.close();
+  });
+
   await test('检查及修复过程没有文档上传或第三方请求', async () => {
     const base = new URL(baseUrl);
     const localReports = new Set(['report.html', 'long-path-report.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));

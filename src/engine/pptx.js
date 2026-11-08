@@ -199,6 +199,63 @@ function hasAncestor(node, predicate) {
   return false;
 }
 
+// A fixed box may use run, paragraph, bullet, end-of-paragraph or list-level
+// declarations. Keep *every* declaration inside it together, including the
+// styles used when someone edits the text later. Never resolve inherited names
+// by guessing what font a particular PowerPoint installation will display.
+function slideLayoutReviews(nodes) {
+  const summaries = new Map();
+  function record(textBody, label, setting) {
+    if (!textBody) return;
+    const contents = descendants(textBody);
+    if (!contents.some(node => isDrawing(node, 't') && node.textContent.trim())) return;
+    const seen = new Set();
+    for (const font of contents) {
+      if (fontAttribute(font) !== 'typeface' || !font.hasAttribute('typeface')) continue;
+      const key = font.namespaceURI + '\0' + attribute(font, 'typeface');
+      const summary = summaries.get(key) || { total: 0, samples: [], declarations: new Set() };
+      summary.declarations.add(font);
+      if (!seen.has(key)) {
+        seen.add(key);
+        summary.total++;
+        if (summary.samples.length < 3) summary.samples.push(`${label}（${setting}）`);
+      }
+      summaries.set(key, summary);
+    }
+  }
+  for (const node of nodes) {
+    if (isPresentation(node, 'sp')) {
+      const textBody = children(node).find(child => isPresentation(child, 'txBody'));
+      const properties = drawingChild(textBody, 'bodyPr');
+      if (!properties) continue;
+      const fit = drawingChild(properties, 'noAutofit') ? '关闭自动适应'
+        : drawingChild(properties, 'normAutofit') ? '允许自动缩小文字' : '';
+      const clipped = attribute(properties, 'horzOverflow') === 'clip' || ['clip', 'ellipsis'].includes(attribute(properties, 'vertOverflow'));
+      const grows = drawingChild(properties, 'spAutoFit');
+      if (grows && attribute(properties, 'wrap') === 'none' && !clipped) continue;
+      const shapeInfo = children(node).find(child => isPresentation(child, 'nvSpPr'));
+      const nameNode = children(shapeInfo).find(child => isPresentation(child, 'cNvPr'));
+      const label = attribute(nameNode, 'name') || `文本框 ${attribute(nameNode, 'id', '（未命名）')}`;
+      const setting = clipped ? '超出边界的文字可能被截去' : fit || (grows ? '换行可能改变框高' : '自动适应方式未直接指定');
+      record(textBody, label, setting);
+    } else if (isDrawing(node, 'tbl')) {
+      const frame = node.parentNode?.parentNode?.parentNode;
+      if (!frame || !isPresentation(frame, 'graphicFrame')) continue;
+      const frameInfo = children(frame).find(child => isPresentation(child, 'nvGraphicFramePr'));
+      const label = attribute(children(frameInfo).find(child => isPresentation(child, 'cNvPr')), 'name') || '表格';
+      const rows = children(node).filter(child => isDrawing(child, 'tr'));
+      rows.forEach((row, r) => {
+        const cells = children(row).filter(child => isDrawing(child, 'tc'));
+        cells.forEach((cell, c) => {
+          if (['hMerge', 'vMerge'].some(key => ['true', '1'].includes(attribute(cell, key)))) return;
+          record(drawingChild(cell, 'txBody'), `${label}第 ${r + 1} 行第 ${c + 1} 列`, '表格单元格');
+        });
+      });
+    }
+  }
+  return summaries;
+}
+
 // This is a lower-bound estimate from explicit hard lines and font sizes, not a
 // renderer. Inherited sizes, wrapping, glyph metrics, kerning and layout-master
 // inheritance are deliberately not guessed.
@@ -264,12 +321,29 @@ function inspectTextBounds(doc, part, slideSize, addIssue, checks) {
       });
     }
     if (!bodyProperties || !drawingChild(bodyProperties, 'noAutofit')) continue;
-    const estimatedHeight = explicitTextHeight(textBody);
-    if (estimatedHeight === null) continue;
-    checks.explicitLineHeightChecks += 1;
     const topMargin = numericAttribute(bodyProperties, 'tIns') ?? 45720;
     const bottomMargin = numericAttribute(bodyProperties, 'bIns') ?? 45720;
     const available = height - topMargin - bottomMargin;
+    // Explicit margins alone can consume all of the space, even when run sizes
+    // are inherited. Omitted margins could instead be inherited on placeholders.
+    const horizontal = width <= (numericAttribute(bodyProperties, 'lIns') ?? 0) + (numericAttribute(bodyProperties, 'rIns') ?? 0);
+    const vertical = height <= (numericAttribute(bodyProperties, 'tIns') ?? 0) + (numericAttribute(bodyProperties, 'bIns') ?? 0);
+    if (horizontal || vertical) {
+      const directions = [horizontal && '水平方向', vertical && '垂直方向'].filter(Boolean).join('和');
+      addIssue('PPTX_TEXT_NO_INNER_SPACE', part, {
+        severity: 'warning', title: '文本框的内边距占满了可用空间',
+        description: `这个文本框关闭了自动适应。文件里设置的内边距已经占满${directions}的空间。`,
+        evidence: `${name}（对象 ${shapeId || '未提供编号'}），宽 ${(width / 12700).toFixed(1)} 磅，高 ${(height / 12700).toFixed(1)} 磅。`,
+        recommendation: '在 PowerPoint 中核对这个文本框。若文字被挤出或遮住，可在副本中减小内边距或加大文本框。',
+      });
+      continue;
+    }
+    // Separate columns share the hard lines. Summing them all into one column
+    // would incorrectly claim that a correctly laid out text box is too short.
+    if ((numericAttribute(bodyProperties, 'numCol') ?? 1) !== 1) continue;
+    const estimatedHeight = explicitTextHeight(textBody);
+    if (estimatedHeight === null) continue;
+    checks.explicitLineHeightChecks += 1;
     if (available > 0 && estimatedHeight > available * 1.25) {
       addIssue('PPTX_TEXT_OVERFLOW_HEURISTIC', part, {
         severity: 'warning', title: '显式行数与字号提示文本框可能过矮（启发式）',
@@ -356,6 +430,8 @@ export function scanPptx(context) {
       continue;
     }
 
+    const slidePart = /^ppt\/slides\/[^/]+\.xml$/.test(part) && isPresentation(doc.documentElement, 'sld');
+    const layoutReviews = slidePart ? slideLayoutReviews(nodes) : new Map();
     const perPartFonts = new Map(), glyphFonts = privateUseFonts(nodes);
     for (const node of nodes.filter(node => isDrawing(node) && fontAttribute(node) === 'typeface' && node.hasAttribute('typeface'))) {
       // Preserve the exact attribute for fix.from: the repair engine makes an
@@ -369,12 +445,15 @@ export function scanPptx(context) {
       const existing = perPartFonts.get(key);
       if (existing) {
         existing.count += 1;
+        if (existing.declarations) existing.declarations.push(node);
         existing.symbol ||= symbol;
         existing.supplementalOnly &&= supplemental;
-      } else perPartFonts.set(key, { name, namespace: node.namespaceURI, count: 1, symbol, supplementalOnly: supplemental });
+      } else perPartFonts.set(key, { name, namespace: node.namespaceURI, count: 1, symbol, supplementalOnly: supplemental,
+        declarations: context.fontTargets && layoutReviews.has(key) ? [node] : null });
     }
     const unverifiedSupplementalFonts = [];
-    for (const { name, namespace, count, symbol, supplementalOnly } of perPartFonts.values()) {
+    let replacementIndex = 0;
+    for (const { name, namespace, count, symbol, supplementalOnly, declarations } of perPartFonts.values()) {
       const themeReference = /^\+(?:mj|mn)-(?:lt|ea|cs)$/.test(name.trim());
       const isPrivateGlyphFont = glyphFonts.has(`${namespace}\u0000${name}`);
       const isSymbol = symbol || isPrivateGlyphFont || isProtectedFont(name);
@@ -397,14 +476,31 @@ export function scanPptx(context) {
           recommendation: '确认目标电脑具有该字体或可用的嵌入字体，并逐项核对符号。',
         });
       } else if (advice && advice.to && advice.to !== name) {
-        addIssue('PPTX_FONT_REPLACEMENT', part, {
-          severity: 'warning', title: `字体可能需要替换：${name}`,
-          description: `${advice.reason} 替换可能改变字宽、换行和版面；这里只提供需要主动选择的候选方案。${embeddedNote}`,
-          evidence: `${name}；${count} 处字体声明`,
-          recommendation: `可考虑替换为 ${advice.to}，随后在目标软件中检查文字、符号和换行。`,
-          fixable: true, defaultSelected: false,
-          fix: { kind: 'font-replace', from: name, to: advice.to, scope: namespace },
-        });
+        const review = layoutReviews.get(namespace + '\0' + name);
+        const boundedCount = review?.declarations.size || 0;
+        const split = boundedCount > 0 && boundedCount < count;
+        const baseId = `PPTX_FONT_REPLACEMENT:${part}:${++replacementIndex}`;
+        for (const bounded of split ? [false, true] : [boundedCount > 0]) {
+          const scope = bounded ? 'bounded' : 'other';
+          const id = split ? `${baseId}:${scope}` : baseId;
+          const affected = bounded ? boundedCount : count - boundedCount;
+          const samples = bounded ? review.samples.join('、') + (review.total > review.samples.length ? `等 ${review.total} 处` : '') : '';
+          const layoutReview = bounded ? `${samples}。换字体后，请在这张幻灯片对照原件的行末、最后一行和字号。` : '';
+          const location = locationFor(part, locations) + (split ? (bounded ? ' · 需复核排版的位置' : ' · 本页其他位置') : '');
+          addIssue('PPTX_FONT_REPLACEMENT', part, {
+            id, location, severity: 'warning', title: `字体可能需要替换：${name}`,
+            description: `${advice.reason} 替换可能改变字宽、换行和版面；这里只提供需要主动选择的候选方案。${embeddedNote}`,
+            evidence: `${name}；${affected} 处字体声明`,
+            recommendation: layoutReview || `可考虑替换为 ${advice.to}，随后在目标软件中检查文字、符号和换行。`,
+            ...(layoutReview && { layoutReview }),
+            fixable: true, defaultSelected: false,
+            fix: { kind: 'font-replace', from: name, to: advice.to, scope: namespace, ...(split && { layoutScope: scope }) },
+          });
+          if (split && context.fontTargets) {
+            const targets = bounded ? review.declarations : new Set(declarations.filter(node => !review.declarations.has(node)));
+            context.fontTargets.set(id, targets);
+          }
+        }
       } else if (!isKnownFont(name, options) && supplementalOnly) {
         unverifiedSupplementalFonts.push(name);
       } else if (!isKnownFont(name, options)) {
@@ -504,7 +600,7 @@ export function scanPptx(context) {
         recommendation: '在目标软件中核对效果及可编辑性。工具保留原对象和已有的备用表示。',
       });
     }
-    if (/^ppt\/slides\/[^/]+\.xml$/.test(part) && isPresentation(doc.documentElement, 'sld')) {
+    if (slidePart) {
       inventory.slidePartCount += 1;
       inspectTextBounds(doc, part, slideSize, addIssue, inventory.heuristicChecks);
     }

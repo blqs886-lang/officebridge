@@ -1,4 +1,5 @@
 import './style.css';
+import { compareSection, bindComparison, openComparison } from './ui/pdf-compare.js';
 import { fontPairHint, unsupportedFileMessage } from './ui/input-help.js';
 import { bindFontList, renderFontList } from './ui/font-list.js';
 import { listedFont } from './engine/target-fonts.js';
@@ -123,6 +124,7 @@ document.querySelector('#app').innerHTML = `
         <div id="file-list" class="file-list"></div><div class="queue-footer">${icon('shield')}<p>关闭页面会清空列表。请先下载需要的副本。</p></div></aside>
       <div id="document-panel" class="document-panel" aria-live="off"></div>
     </section>
+    ${compareSection}
     <details class="verification" id="verification"><summary>第一次用？查看操作指南</summary>
       <div class="verification-steps">
         <div><h3>从 Mac 导出</h3><p>在 Keynote 或 Numbers 里打开原稿，选择“文件”→“导出为”，选 PowerPoint 或 Excel。已有 PPTX 或 XLSX 可以直接拖进来。</p></div>
@@ -139,6 +141,7 @@ document.querySelector('#app').innerHTML = `
   <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 `;
 
+bindComparison();
 const fileInput = document.querySelector('#file-input');
 const workspace = document.querySelector('#workspace');
 const inputErrors = document.querySelector('#input-errors');
@@ -354,6 +357,15 @@ function fontChoices(issues) {
   return [...pairs.values()];
 }
 
+function layoutConcern(issue) {
+  if (issue.layoutReview) return issue.layoutReview;
+  const fix = issue.fix;
+  if (fix.affectsDefaultFont || fix.affectsWrappedRows || fix.affectsCellFit || fix.layoutUnverified) return issue.description;
+  if (/^(ppt|xl)\/(charts|diagrams)\//.test(issue.part || '')) return '图表刻度、标签或图示中的文字可能互相遮挡，请在 Office 中查看。';
+  if (/^(ppt|xl)\/(theme|slideMasters|slideLayouts)\//.test(issue.part || '')) return '这是共用的字体设置，改动可能影响多处内容。';
+  return '';
+}
+
 function renderChoices(record, groups) {
   const disabled = isDocumentBusy(record) ? 'disabled' : '';
   function input(issue) {
@@ -365,12 +377,12 @@ function renderChoices(record, groups) {
     const map = `<span class="font-map"><strong>${esc(issue.fix.from)}</strong>${icon('arrow')}<strong>${esc(issue.fix.to)}</strong></span>`;
     const isGroup = group.length > 1;
     const location = isGroup ? `${group.length} 个位置` : esc(choiceLocation(issue));
-    const descriptions = [...new Set(group.filter(i => i.fix.affectsDefaultFont || i.fix.affectsWrappedRows).map(i => i.description))];
-    const examples = group.filter(i => i.fix.affectsWrappedRows && i.evidence).map(i => i.evidence);
+    const descriptions = [...new Set(group.map(layoutConcern).filter(Boolean))];
+    const examples = group.filter(i => (i.fix.affectsWrappedRows || i.fix.affectsCellFit) && i.evidence).map(i => i.evidence);
     const note = descriptions.length ? `<p class="choice-note">${descriptions.map(esc).join(' ')}${examples.length ? ' ' + esc(examples[0]) : ''}</p>` : '';
     const control = isGroup ? `<input type="checkbox" data-font-group="${index}" aria-label="将 ${esc(issue.fix.from)} 替换为 ${esc(issue.fix.to)}，共 ${group.length} 个位置" ${disabled}>` : input(issue);
     return `<article class="font-choice issue-card${isGroup ? ' font-choice-group' : ''}"><label class="fix-option">${control}<span>${map}${hint ? `<small class="choice-hint">${esc(hint)}</small>` : ''}<small class="choice-location">${location}</small></span></label>${note}
-      ${isGroup ? `<details class="font-places"><summary>逐处选择</summary>${group.map(i => `<label class="fix-option">${input(i)}<span>${esc(choiceLocation(i))}</span></label>`).join('')}</details>` : ''}</article>`;
+      ${isGroup ? `<details class="font-places"><summary>逐处选择</summary>${group.map(i => `<label class="fix-option">${input(i)}<span>${esc(choiceLocation(i))}${layoutConcern(i) ? '<small>需额外核对排版</small>' : ''}</span></label>`).join('')}</details>` : ''}</article>`;
   }).join('');
 }
 
@@ -395,6 +407,7 @@ function renderDocument() {
   const counts = { error: issues.filter((issue) => issue.severity === 'error').length, warning: issues.filter((issue) => issue.severity === 'warning').length, info: issues.filter((issue) => issue.severity === 'info').length };
   const fixable = fixableIssues(record);
   const groups = fontChoices(fixable);
+  const lowerRisk = fixable.filter(issue => !layoutConcern(issue));
   const manual = issues.filter(issue => !issue.fixable && (issue.severity === 'error' || issue.severity === 'warning'));
   manual.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
   const busy = isDocumentBusy(record);
@@ -405,6 +418,7 @@ function renderDocument() {
     ${renderSummary(record, fixable, manual)}
     <section class="repair-panel" ${groups.length ? '' : 'hidden'} aria-labelledby="repair-title">
       <div class="repair-panel-heading"><div><h3 id="repair-title">选择要替换的字体</h3><p>只勾选遇到问题的字体。修改会保存到新文件。</p></div></div>
+      ${fixable.length ? `<div class="layout-choice">${lowerRisk.length ? `<button id="select-lower-risk" class="button secondary compact" ${busy ? 'disabled' : ''}>只选较少影响排版的位置</button><p>${lowerRisk.length < fixable.length ? `勾选 ${lowerRisk.length} 个位置，跳过另外 ${fixable.length - lowerRisk.length} 个需额外核对排版的位置。` : `勾选下方 ${lowerRisk.length} 个位置。也可以逐项选择。`}</p>` : '<strong>这些替换都需要额外核对排版</strong><p>原稿排版正常时可以直接用。确实错位时，逐处勾选并对照副本。</p>'}</div>` : ''}
       <div class="font-choice-list">${renderChoices(record, groups)}</div>
       <div class="repair-selection"><span id="selection-summary"></span><div><button id="select-fixes" class="text-button" ${!fixable.length || busy ? 'disabled' : ''}>全选</button><button id="clear-fixes" class="subtle-button" disabled>取消选择</button></div></div>
       <p id="font-caution" class="font-caution"></p>
@@ -445,6 +459,10 @@ function renderDocument() {
   }
   panel.querySelectorAll('[data-issue-id]').forEach(check => check.addEventListener('change', () => select([check.dataset.issueId], check.checked)));
   panel.querySelectorAll('[data-font-group]').forEach(check => check.addEventListener('change', () => select(groups[Number(check.dataset.fontGroup)].map(i => i.id), check.checked)));
+  panel.querySelector('#select-lower-risk')?.addEventListener('click', () => {
+    record.selected.clear();
+    select(lowerRisk.map(issue => issue.id), true);
+  });
   panel.querySelector('#select-fixes').addEventListener('click', () => select(fixable.map(i => i.id), true));
   panel.querySelector('#clear-fixes').addEventListener('click', () => select([...record.selected], false));
   panel.querySelector('#repair-file').addEventListener('click', () => repair(record));
@@ -492,6 +510,7 @@ function updateSelection(record, groups) {
   } else if (selected.some(issue => issue.fix.affectsWrappedRows)) {
     caution = '已选字体用于自动换行、自动行高的单元格。请在下载后对比打印预览的总页数和每页首末行。';
   }
+  if (selected.some(issue => issue.layoutReview)) caution = '所选位置含需要核对的文本框或表格。请查看行末和最下面一行，再对照两份 PDF。';
   document.querySelector('#font-caution').textContent = caution;
   document.querySelector('#font-caution').hidden = !caution;
   summary.innerHTML = `已选 <strong>${record.selected.size}</strong> / ${fixableIssues(record).length} 处替换`;
@@ -506,7 +525,8 @@ function updateSelection(record, groups) {
   }
   const total = (record.repaired.changes || []).reduce((sum, change) => sum + (change.count || 0), 0);
   const unresolved = record.repaired.report?.issues?.length || 0;
-  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>替换了 ${total} 处字体。请在浏览器的下载记录中打开副本，用 Windows ${record.format === 'pptx' ? 'PowerPoint 试播' : 'Excel 检查打印预览'}。</p><p class="repaired-name">${esc(safeFileName(record.repaired.fileName))}</p><button class="button success" id="download-repaired">${icon('download')} 再次下载副本</button><p class="font-settings-error" id="copy-download-error" role="status" ${record.downloadError ? '' : 'hidden'}>${esc(record.downloadError || '')}</p><details class="changes-details"><summary>查看修改记录和复查结果</summary><p>复查还有 ${unresolved} 项提示，详情见检查报告。</p><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
+  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>替换了 ${total} 处字体。请在浏览器的下载记录中打开副本，用 Windows ${record.format === 'pptx' ? 'PowerPoint 试播' : 'Excel 检查打印预览'}。</p><p class="repaired-name">${esc(safeFileName(record.repaired.fileName))}</p><button class="button success" id="download-repaired">${icon('download')} 再次下载副本</button> <button type="button" id="compare-result" class="text-button">对照两份 PDF</button><p class="font-settings-error" id="copy-download-error" role="status" ${record.downloadError ? '' : 'hidden'}>${esc(record.downloadError || '')}</p><details class="changes-details"><summary>查看修改记录和复查结果</summary><p>复查还有 ${unresolved} 项提示，详情见检查报告。</p><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.location || change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
+  document.querySelector('#compare-result').addEventListener('click', openComparison);
   document.querySelector('#download-repaired').addEventListener('click', () => {
     downloadCopy(record);
   });

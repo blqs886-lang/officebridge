@@ -60,8 +60,10 @@ const quickStart = `OfficeBridge ${pkg.version}
 1. 用 Chrome 或 Windows Edge 打开 OfficeBridge.html。如果你下载了 ZIP，请先完整解压。
 2. 点“选择文件”，或拖入 .pptx 演示文稿、.xlsx 表格。也可以先点“表格样例”体验。
 3. 先看检查结果。原件在 Windows 上已经显示、打印正常时，可以直接使用原件。
-4. 需要换字体时，勾选对应的字体，再点“生成并下载副本”。浏览器会下载文件，可以从“下载”中找到名称含 .windows 的副本。
+4. 需要换字体时，可以点“只选较少影响排版的位置”或逐项勾选，再点“生成并下载副本”。浏览器会下载文件，可以从“下载”中找到名称含 .windows 的副本。
 5. 用 Windows PowerPoint 或 Excel 打开副本。演示文稿核对换行、试播动画；表格在打印预览中核对每页首末行，改个测试值并重开。
+
+如需看清分页或排版差异，两台电脑各自导出一份 PDF。展开“对照两份 PDF 的页数和排版”，在左、右分别选择对应的文件即可。
 
 文件只在本机处理，支持断网。原文件会保留。刷新或关闭页面会清空本次列表，下载好的文件仍在磁盘上。
 Keynote 或 Numbers 请先从原应用导出成 PowerPoint 或 Excel。换字体可能改变字宽和分页；它不能恢复已经丢失的文字。
@@ -72,7 +74,7 @@ await fs.writeFile(path.join(release, 'START-HERE.txt'), quickStart);
 const portable = Object.create(null);
 portable['OfficeBridge.html'] = zipEntry(await fs.readFile(path.join(release, 'OfficeBridge.html')));
 portable['START-HERE.txt'] = zipEntry(encoder.encode(quickStart));
-for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/QUICKSTART.md', 'docs/WINDOWS-VERIFICATION.md', 'docs/TESTING.md', 'docs/images/start.png',
+for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/QUICKSTART.md', 'docs/WINDOWS-VERIFICATION.md', 'docs/TESTING.md', 'docs/images/start.png', 'docs/images/proof.png',
   'scripts/verify-windows.ps1', 'public/examples/officebridge-demo.pptx', 'public/examples/officebridge-demo.xlsx']) {
   portable[file] = zipEntry(await fs.readFile(path.join(root, file)));
 }

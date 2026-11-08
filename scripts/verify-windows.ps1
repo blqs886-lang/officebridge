@@ -5,8 +5,8 @@ Read-only opening check in installed Windows desktop Excel / PowerPoint.
 .DESCRIPTION
 Does not save documents, recalculate formulas, refresh connections, install fonts,
 change Trust Center policy, export previews, or establish visual equivalence.
-Close ALL Excel and PowerPoint windows before starting; keep them closed during
-the check. The script never kills a process. See docs/WINDOWS-VERIFICATION.md.
+Checks Excel printer pagination for matching original and .windows workbooks.
+Uses only a newly created Office process. See docs/WINDOWS-VERIFICATION.md.
 #>
 [CmdletBinding()]
 param(
@@ -37,16 +37,6 @@ namespace OfficeBridge {
     }
 }
 '@
-}
-
-function Get-OfficeProcesses {
-    return ,@(Get-Process -Name EXCEL, POWERPNT -ErrorAction SilentlyContinue)
-}
-
-function Assert-OfficeClosed {
-    if ((Get-OfficeProcesses).Count -gt 0) {
-        throw 'Excel 或 PowerPoint 正在运行。请先保存工作并关闭这两个应用，再重试。脚本没有关闭任何进程。'
-    }
 }
 
 function Assert-OfficeInstalled([string] $ProgId) {
@@ -196,6 +186,84 @@ function Get-StreamSha256([IO.Stream] $Stream) {
     finally { $hash.Dispose() }
 }
 
+function Get-PrintLayout($Worksheets) {
+    $sheets = @()
+    $count = [int]$Worksheets.Count
+    for ($index = 1; $index -le [Math]::Min(50, $count); $index++) {
+        $sheet = $null
+        $entry = [ordered]@{ index = $index; name = $null; visible = $null; pages = $null; beforeRows = @(); beforeColumns = @(); complete = $false; note = $null }
+        try {
+            $sheet = $Worksheets.Item($index)
+            $entry.name = [string]$sheet.Name
+            $entry.visible = [int]$sheet.Visible -eq -1
+            if ($entry.visible) {
+                [void]$sheet.Activate()
+                # Normal view can return only the first screen's breaks. Force
+                # pagination in this disposable, read-only workbook window.
+                $sheet.Parent.Windows.Item(1).View = 2 # xlPageBreakPreview
+                $sheet.DisplayPageBreaks = $true
+                $pages = [int]$sheet.PageSetup.Pages.Count
+                if ($pages -lt 1) { throw 'Excel 未返回有效的打印页数。' }
+                $entry.pages = $pages
+                $horizontal = $sheet.HPageBreaks
+                $vertical = $sheet.VPageBreaks
+                $hCount = [int]$horizontal.Count
+                $vCount = [int]$vertical.Count
+                if ($hCount -gt 128 -or $vCount -gt 128) { throw '分页点过多，仅记录页数。' }
+                for ($i = 1; $i -le $hCount; $i++) { $entry.beforeRows += [int]$horizontal.Item($i).Location.Row }
+                for ($i = 1; $i -le $vCount; $i++) { $entry.beforeColumns += [int]$vertical.Item($i).Location.Column }
+            }
+            $entry.complete = $true
+        }
+        catch { $entry.note = $_.Exception.Message }
+        finally { Release-ComReference $sheet }
+        $sheets += [pscustomobject]$entry
+    }
+    return [pscustomobject]@{ allSheetsVisited = $count -le 50; sheets = $sheets }
+}
+
+function Compare-PrintLayout($Original, $Copy) {
+    $pair = [ordered]@{ original = $Original.fileName; copy = $Copy.fileName; status = 'unknown'; details = @() }
+    if (!$Original.openedSuccessfully -or !$Copy.openedSuccessfully -or !$Original.sourceUnchanged -or !$Copy.sourceUnchanged) {
+        $pair.details += '其中一份文件未完成只读检查。'
+        return [pscustomobject]$pair
+    }
+    $left = $Original.printLayout
+    $right = $Copy.printLayout
+    $unknown = !$left.allSheetsVisited -or !$right.allSheetsVisited
+    if (!@($left.sheets | Where-Object { $_.visible }).Count -or !@($right.sheets | Where-Object { $_.visible }).Count) { $unknown = $true }
+    $different = $Original.sheetCount -ne $Copy.sheetCount
+    if ($different) { $pair.details += ('工作表数量由 {0} 变为 {1}。' -f $Original.sheetCount, $Copy.sheetCount) }
+    for ($i = 0; $i -lt [Math]::Min($left.sheets.Count, $right.sheets.Count); $i++) {
+        $a = $left.sheets[$i]
+        $b = $right.sheets[$i]
+        if ($null -eq $a.visible -or $null -eq $b.visible) { $unknown = $true; continue }
+        if ($a.name -cne $b.name -or $a.visible -ne $b.visible) {
+            $different = $true
+            $pair.details += ('第 {0} 张工作表的名称、顺序或可见状态有变化。' -f ($i + 1))
+            continue
+        }
+        if (!$a.visible) { continue }
+        if ($null -ne $a.pages -and $null -ne $b.pages -and $a.pages -ne $b.pages) {
+            $different = $true
+            $pair.details += ('「{0}」由 {1} 页变为 {2} 页。' -f $a.name, $a.pages, $b.pages)
+        }
+        if (!$a.complete -or !$b.complete) { $unknown = $true; continue }
+        foreach ($axis in @('beforeRows', 'beforeColumns')) {
+            if (($a.$axis -join ',') -cne ($b.$axis -join ',')) {
+                $different = $true
+                $unit = if ($axis -eq 'beforeRows') { '行' } else { '列' }
+                $before = if ($a.$axis.Count) { $a.$axis -join '、' } else { '无' }
+                $after = if ($b.$axis.Count) { $b.$axis -join '、' } else { '无' }
+                $pair.details += ('「{0}」换页的{1}号由 {2} 变为 {3}（数字是新一页的起始{1}号）。' -f $a.name, $unit, $before, $after)
+            }
+        }
+    }
+    if ($unknown) { $pair.details += '部分工作表或分页点无法读取。请在 Excel 的打印预览中核对。' }
+    $pair.status = if ($different) { 'different' } elseif ($unknown) { 'unknown' } else { 'same' }
+    return [pscustomobject]$pair
+}
+
 function Test-OneDocument([string] $InputPath) {
     $result = [ordered]@{
         fileName = $InputPath
@@ -203,6 +271,7 @@ function Test-OneDocument([string] $InputPath) {
         openedSuccessfully = $false; actualOfficeOpenPerformed = $false
         officeApplication = $null; officeVersion = $null; officeBuild = $null
         processOwnershipVerified = $false; sheetCount = $null; slideCount = $null
+        printLayout = $null
         visualConsistencyVerified = $false; formulaCalculationVerified = $false
         editabilityVerified = $false; animationAndMediaVerified = $false
         error = $null; cleanupNote = $null
@@ -223,16 +292,19 @@ function Test-OneDocument([string] $InputPath) {
         $source = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $result.sha256 = Get-StreamSha256 $source
         Assert-LocalPackage $source ($file.Extension.ToLowerInvariant())
-        Assert-OfficeClosed
         $progId = if ($file.Extension -ieq '.xlsx') { 'Excel.Application' } else { 'PowerPoint.Application' }
         $processName = if ($file.Extension -ieq '.xlsx') { 'EXCEL' } else { 'POWERPNT' }
+        $existingIds = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+        if ($processName -eq 'POWERPNT' -and $existingIds.Count -gt 0) {
+            throw 'PowerPoint 正在使用。请先保存并关闭 PowerPoint，再检查演示文稿。'
+        }
         Assert-OfficeInstalled $progId
         $startTime = [DateTime]::UtcNow
         $app = New-Object -ComObject $progId
         [uint32]$officeProcessId = 0
         [void][OfficeBridge.NativeWindow]::GetWindowThreadProcessId([IntPtr]$app.HWND, [ref]$officeProcessId)
         $process = Get-Process -Id $officeProcessId
-        if ($process.ProcessName -ine $processName -or $process.StartTime.ToUniversalTime() -lt $startTime -or (Get-OfficeProcesses).Count -ne 1) {
+        if ($process.ProcessName -ine $processName -or $process.StartTime.ToUniversalTime() -lt $startTime -or $existingIds -contains $process.Id) {
             throw '无法确认 Office 进程是本次新建的独立会话，已停止。不会终止任何进程。'
         }
         $owned = $true
@@ -253,12 +325,13 @@ function Test-OneDocument([string] $InputPath) {
             $blank = $documents.Add(-4167) # xlWBATWorksheet
             $app.Calculation = -4135 # xlCalculationManual
             $app.CalculateBeforeSave = $false
-            $missing = [Type]::Missing
             $app.AutomationSecurity = 3
             $result.actualOfficeOpenPerformed = $true
-            $document = $documents.Open($file.FullName, 0, $true, $missing, '', '', $true, $missing, $missing, $false, $false, $missing, $false, $false, 0)
+            $document = $documents.Open($file.FullName, 0, $true)
+            if (!$document.ReadOnly) { throw 'Excel 未将该文件以只读方式打开。' }
             $items = $document.Worksheets
             $result.sheetCount = [int]$items.Count
+            $result.printLayout = Get-PrintLayout $items
         }
         else {
             $documents = $app.Presentations
@@ -314,7 +387,6 @@ function Test-OneDocument([string] $InputPath) {
     return [pscustomobject]$result
 }
 
-Assert-OfficeClosed
 if (-not $Path -or $Path.Count -eq 0) {
     $dialog = New-Object Windows.Forms.OpenFileDialog
     try {
@@ -336,13 +408,24 @@ if ($TargetFonts.Count -gt 0) {
 }
 
 $results = @($Path | ForEach-Object { Test-OneDocument $_ })
+$comparisons = @()
+foreach ($copy in $results) {
+    if ($copy.fileName -notmatch '^(.+)\.windows\.xlsx$') { continue }
+    $originalName = $Matches[1] + '.xlsx'
+    $originals = @($results | Where-Object { $_.fileName -eq $originalName })
+    $copies = @($results | Where-Object { $_.fileName -eq $copy.fileName })
+    if ($originals.Count -eq 1 -and $copies.Count -eq 1) {
+        $comparisons += Compare-PrintLayout $originals[0] $copy
+    }
+}
 $report = [ordered]@{
-    schemaVersion = 1
-    checkerVersion = '0.1.0'
+    schemaVersion = 2
+    checkerVersion = '1.0.0'
     checkedAtUtc = [DateTime]::UtcNow.ToString('o')
     windowsVersion = [Environment]::OSVersion.VersionString
     powerShellVersion = $PSVersionTable.PSVersion.ToString()
-    scope = '仅验证在已安装的 Windows 桌面 Office 中只读打开并读取页数；未验证版面一致性、公式结果、动画或可编辑性。'
+    scope = '在本机桌面 Office 只读打开。Excel 可见工作表按当前打印机读取页数和分页点，与同名原件比较。PowerPoint 记录幻灯片数量。'
+    printComparisons = $comparisons
     targetFonts = $fontResults
     fontCheckLimitation = '字体家族名称同时核对系统默认、英文及简繁中文名称；不验证字符覆盖、Office 云字体、实际替换或布局。'
     files = $results
@@ -357,3 +440,13 @@ finally { $output.Dispose() }
 Write-Host ('报告已保存：' + $OutputPath)
 Write-Host '成功打开不代表已经验证版面一致、公式正确或可编辑性。'
 $results | Select-Object fileName, openedSuccessfully, sheetCount, slideCount, sourceUnchanged, error | Format-Table -Wrap
+
+foreach ($pair in $comparisons) {
+    $summary = switch ($pair.status) {
+        'different' { '打印分页或工作表有变化' }
+        'same' { '可见工作表的打印页数和分页点相同' }
+        'unknown' { '未能完整核对打印分页' }
+    }
+    Write-Host ($pair.original + ' → ' + $pair.copy + '　' + $summary)
+    foreach ($detail in $pair.details) { Write-Host ('  ' + $detail) }
+}

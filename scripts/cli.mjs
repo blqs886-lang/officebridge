@@ -188,7 +188,7 @@ async function main(args) {
   let settings;
   try {
     const [major, minor] = process.versions.node.split('.').map(Number);
-    if (major < 22 || (major === 22 && minor < 12)) throw new CliError('请使用 Node.js 22.12 或更新版本。');
+    if (major < 22 || (major === 22 && minor < 13)) throw new CliError('请使用 Node.js 22.13 或更新版本。');
     settings = parseArguments(args);
   } catch (error) {
     process.stderr.write(`参数错误：${quoted(errorMessage(error))}\n使用 --help 查看用法。\n`);

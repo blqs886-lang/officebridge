@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { XMLSerializer } from '@xmldom/xmldom';
 import { scanXlsx } from '../src/engine/xlsx.js';
-import { NS, parseXml, escapeAttribute } from '../src/engine/xml.js';
+import { NS, parseXml, escapeAttribute, replaceFontAttributes } from '../src/engine/xml.js';
 import { createDemo } from '../src/engine/demo.js';
 import { readArchive, writeArchive } from '../src/engine/archive.js';
 import { analyzeOffice, repairOffice } from '../src/engine/index.js';
@@ -78,6 +78,124 @@ test('auto-height print review follows only fonts used by visible wrapped text, 
   assert.match(affected[2].evidence, /C1/);
   assert.match(affected[3].evidence, /A6/);
   assert.ok(affected.every(item => /自动行高/.test(item.description) && /打印预览/.test(item.recommendation)));
+});
+
+test('individual same-name choices preserve the workbook default and wrapped styles in the same XML part', async () => {
+  const entries = readArchive(createDemo('xlsx')).entries;
+  const encoder = new TextEncoder(), decoder = new TextDecoder();
+  const stylePart = 'xl/styles.xml', sheetPart = 'xl/worksheets/sheet1.xml';
+  const font = (size, face = 'Helvetica Neue') => `<font><name val="${face}"/><sz val="${size}"/></font>`;
+  const styleXml = styles('<fonts>' + [10, 11, 12, 13, 14].map(size => font(size)).join('') + font(15, 'Menlo') + '</fonts>' +
+    '<cellStyleXfs><xf fontId="0"/></cellStyleXfs><cellStyles><cellStyle builtinId="0" xfId="0"/></cellStyles>' +
+    '<cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"><alignment wrapText="1"/></xf>' +
+    '<xf fontId="3"><alignment wrapText="1"/></xf><xf fontId="4"/><xf fontId="5"/></cellXfs>');
+  entries.set(stylePart, encoder.encode(styleXml));
+  entries.set(sheetPart, encoder.encode(sheet('<sheetData><row r="1">' + inline('A1', '标题', 's="1"') + inline('B1', '行高跟随换行', 's="2"') +
+    inline('C1', '此处也使用 B1 的样式', 's="2"') + '</row><row r="2" customHeight="1" ht="15">' + inline('A2', '固定高度的说明', 's="3"') + '</row></sheetData>')));
+  entries.set('xl/worksheets/sheet2.xml', encoder.encode(sheet('<sheetData/>')));
+  const bytes = writeArchive(entries);
+  const report = await analyzeOffice(bytes, 'mixed.xlsx');
+  const choices = report.issues.filter(item => item.fix?.from === 'Helvetica Neue');
+  const byScope = new Map(choices.map(choice => [choice.fix.layoutScope, choice]));
+  assert.deepEqual([...byScope.keys()], ['default', 'other', 'auto-height', 'text-fit']);
+  assert.ok(choices.every(item => !item.defaultSelected && !item.id.endsWith(':0')));
+  assert.match(byScope.get('auto-height').location, /B1/);
+  assert.match(byScope.get('text-fit').evidence, /A2/);
+  assert.equal(report.issues.find(item => item.fix?.from === 'Menlo').id, 'FONT_REPLACEMENT_AVAILABLE:xl/styles.xml:1');
+  const originalId = 'FONT_REPLACEMENT_AVAILABLE:xl/styles.xml:0';
+  await assert.rejects(() => repairOffice(bytes, 'mixed.xlsx', { selectedIssueIds: [originalId] }), /失效/);
+  const repair = async scopes => {
+    const repaired = await repairOffice(bytes, 'mixed.xlsx', { selectedIssueIds: scopes.map(scope => byScope.get(scope).id) });
+    const after = readArchive(repaired.bytes).entries;
+    for (const [part, value] of entries) if (part !== stylePart) assert.deepEqual(after.get(part), value);
+    return { xml: decoder.decode(after.get(stylePart)), changes: repaired.changes };
+  };
+  const ordinary = await repair(['other']);
+  assert.equal(ordinary.xml, styleXml.replace(font(11), font(11, 'Arial')).replace(font(14), font(14, 'Arial')));
+  assert.deepEqual(ordinary.changes.map(item => [item.count, item.printReview]), [[2, undefined]]);
+  assert.equal(ordinary.changes[0].location, byScope.get('other').location);
+  const wrapped = await repair(['text-fit', 'auto-height']);
+  assert.equal(wrapped.xml, styleXml.replace(font(12), font(12, 'Arial')).replace(font(13), font(13, 'Arial')));
+  assert.ok(wrapped.changes.every(item => item.count === 1 && /打印预览/.test(item.printReview)));
+  assert.equal((await repair([...byScope.keys()])).xml, styleXml.replaceAll('Helvetica Neue', 'Arial'));
+  assert.equal(decoder.decode(readArchive(bytes).entries.get(stylePart)), styleXml);
+});
+
+test('theme fonts associated with a wrapped rich run require manual layout review only in the active family', () => {
+  const theme = `<a:theme xmlns:a="${A}"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Menlo"/></a:majorFont>` +
+    '<a:minorFont><a:latin typeface="Helvetica"/><a:font script="Hans" typeface="PingFang SC"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>';
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Arial"/></font></fonts><cellXfs><xf fontId="0"><alignment wrapText="1"/></xf></cellXfs>'),
+    'xl/_rels/workbook.xml.rels': `<Relationships xmlns="${NS.rel}"><Relationship Id="rId2" Type="${NS.r}/theme" Target="theme/active.xml"/></Relationships>`,
+    'xl/theme/active.xml': theme, 'xl/theme/unused.xml': theme,
+    'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><rPr><scheme val="minor"/></rPr><t>英文及汉字</t></r></is></c></row></sheetData>'),
+  });
+  const flagged = result.issues.filter(i => i.fix?.layoutUnverified);
+  assert.deepEqual(flagged.map(i => [i.part, i.fix.from]), [['xl/theme/active.xml', 'Helvetica'], ['xl/theme/active.xml', 'PingFang SC']]);
+  assert.ok(flagged.every(i => /主题引用示例.*A1/.test(i.evidence)));
+});
+
+test('shrink-to-fit, rotated text and uncached formulas with wrapping stay out of ordinary locations', () => {
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Arial"/></font><font><name val="Menlo"/></font><font><name val="Monaco"/></font><font><name val="Helvetica"/></font></fonts>' +
+      '<cellXfs><xf fontId="0"/><xf fontId="1"><alignment shrinkToFit="1"/></xf><xf fontId="2"><alignment textRotation="90"/></xf><xf fontId="3"><alignment wrapText="1"/></xf></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1">' + inline('A1', '缩小', 's="1"') + inline('B1', '旋转', 's="2"') + '<c r="C1" s="3"><f>A1</f></c></row></sheetData>'),
+  });
+  assert.deepEqual(result.issues.filter(i => i.fix?.affectsCellFit).map(i => i.fix.from), ['Menlo', 'Monaco']);
+  assert.equal(result.issues.find(i => i.fix?.affectsWrappedRows).fix.from, 'Helvetica');
+});
+
+test('the quick choice withholds a font whose unwrapped text is likely obscured by its neighbour', () => {
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Arial"/></font><font><name val="Menlo"/></font><font><name val="Monaco"/></font></fonts>' +
+      '<cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"/></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet('<cols><col min="1" max="1" width="3"/></cols><sheetData><row r="1">' +
+      inline('A1', '订单处理状态', 's="1"') + inline('B1', '已处理', 's="2"') + '</row></sheetData>'),
+  });
+  assert.match(issue(result, 'TEXT_CLIPPING_HEURISTIC').location, /A1/);
+  const sensitive = result.issues.filter(i => i.fix?.affectsCellFit);
+  assert.deepEqual(sensitive.map(i => i.fix.from), ['Menlo']);
+  assert.match(sensitive[0].evidence, /A1/);
+});
+
+test('implicit row and cell references cover numeric, cached and uncached formula display', () => {
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Arial"/></font><font><name val="Menlo"/></font><font><name val="Monaco"/></font><font><name val="Helvetica"/></font></fonts>' +
+      '<cellXfs><xf fontId="0"/><xf fontId="1"><alignment shrinkToFit="1"/></xf><xf fontId="2"><alignment textRotation="90"/></xf><xf fontId="3"><alignment wrapText="1"/></xf></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet('<cols><col min="27" max="27" style="1"/></cols><sheetData>' +
+      '<row r="7"><c r="Z7"/><c><v>123456789</v></c><c s="2"><f>12+5</f><v>17</v></c></row>' +
+      '<row><c s="3"><f>TEXT(1,0)</f><v/></c></row></sheetData>'),
+  });
+  const affected = result.issues.filter(i => i.fix?.affectsCellFit || i.fix?.affectsWrappedRows);
+  assert.deepEqual(affected.map(i => i.fix.from), ['Menlo', 'Monaco', 'Helvetica']);
+  for (const [i, ref] of ['AA7', 'AB7', 'A8'].entries()) assert.ok(affected[i].evidence.includes(ref));
+});
+
+test('an omitted complex-sheet layout check marks all replacements for manual review', () => {
+  const cells = Array.from({ length: 1500 }, (_, i) => `<row r="${i + 1}">${inline('A' + (i + 1), '文字')}</row>`).join('');
+  const columns = Array.from({ length: 1400 }, (_, i) => `<col min="${i + 1}" max="${i + 1}" width="12"/>`).join('');
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Menlo"/></font></fonts><cellXfs><xf fontId="0"/></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet(`<cols>${columns}</cols><sheetData>${cells}</sheetData>`),
+  });
+  assert.ok(issue(result, 'LAYOUT_HEURISTIC_LIMIT'));
+  const fix = result.issues.find(i => i.fixable);
+  assert.ok(fix.fix.layoutUnverified);
+  assert.match(fix.description, /需手动核对/);
+});
+
+test('scoped XML replacement rejects absent, overlapping and detached target lists', () => {
+  const xml = styles('<fonts><font><name val="Menlo"/></font></fonts>');
+  const doc = parseXml(xml), name = doc.getElementsByTagName('name')[0];
+  const ordinary = { issueId: 'all', scope: S, from: 'Menlo', to: 'Consolas' };
+  const scoped = { ...ordinary, issueId: 'pick', layoutScope: 'other' };
+  const alternate = { ...scoped, issueId: 'overlap' };
+  const map = new Map([['pick', new Set([name])], ['overlap', new Set([name])]]);
+  assert.throws(() => replaceFontAttributes(xml, doc, [scoped]), /所选/);
+  assert.throws(() => replaceFontAttributes(xml, doc, [scoped, ordinary], map), /重叠/);
+  assert.throws(() => replaceFontAttributes(xml, doc, [ordinary, scoped], map), /冲突/);
+  assert.throws(() => replaceFontAttributes(xml, doc, [scoped, alternate], map), /不一致/);
+  assert.throws(() => replaceFontAttributes(xml, parseXml(xml), [scoped], map), /不一致/);
 });
 
 test('exported repair reports carry the print check only on a selected default font change', async () => {

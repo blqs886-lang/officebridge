@@ -1,47 +1,44 @@
-# 在 Windows Office 中做一次实际打开检查
+# 用 Windows Excel 对照原稿和副本的打印分页
 
-这个可选脚本会调用 Windows 电脑上**已安装的桌面版 Excel / PowerPoint**，只读打开选中的文件，记录 Office 版本、页数或工作表数量，以及打开前后的文件指纹。它不会修改原文件。
-
-它验证的是“这个文件能否被这台电脑上的 Office 打开”。**打开成功不等于排版一致、公式正确、动画正常或已证明能够继续编辑。** 这些仍需在目标电脑人工核对。浏览器中的 OfficeBridge 报告与此脚本报告是两个独立结果；脚本不会回写浏览器报告中的验证状态。
+便携 ZIP 里附有一项可选的桌面 Office 检查。一次选中原稿和 OfficeBridge 生成的表格副本后，它会用这台电脑的 Excel 打开两份文件，列出各工作表的打印页数，以及哪一行、哪一列开始换页。日常使用离线网页无需运行脚本。
 
 ## 怎么使用
 
-1. 将 OfficeBridge 项目解压到 Windows 的普通本地文件夹。安装的 Office 需要已完成首次启动、激活和登录。
-2. 保存手头工作，然后完全关闭 **Excel 和 PowerPoint**。检查期间也不要打开它们。脚本发现它们已经运行时会停止，绝不会替你结束进程。
-3. 在项目文件夹空白处按住 Shift，点鼠标右键，选择“在此处打开 PowerShell 窗口”。也可以在资源管理器地址栏输入 `powershell` 后回车。
-4. 输入下面这行，再在弹出的文件选择框里选择原稿、修复副本，或两者：
+1. 将便携 ZIP 完整解压到 Windows 本地文件夹。电脑需要已激活的桌面版 Excel，打印预览可正常使用。检查演示文稿时还需安装 PowerPoint，并先保存、关闭已打开的 PowerPoint 窗口。
+2. 打开刚解压的文件夹，在资源管理器地址栏输入 `powershell`，按回车。
+3. 输入以下命令。在打开的选择框中，按住 Ctrl 同时选中原稿和副本，例如 `预算.xlsx` 和 `预算.windows.xlsx`。选择框一次只能选同一文件夹里的文件。
 
    ```powershell
    powershell.exe -NoProfile -STA -File .\scripts\verify-windows.ps1
    ```
 
-5. 结果文件会保存在项目的 `work` 文件夹，名字以 `OfficeBridge-Windows-` 开头，格式为 JSON。窗口中也会显示成功与失败结果。检查完成后，再用 Office 正常打开文件核对版面。
+4. 查看窗口最下方的中文结果。若显示“由 3 页变为 4 页”，下一行会列出原稿和副本在哪些行或列前换页。打开两份文件的打印预览，查看这些位置。报告保存在解压目录的 `work` 文件夹中。
 
-如果系统策略不允许运行脚本，请先阅读脚本，按所在单位的规定交给管理员运行。无需降低 Office 宏设置，也不要为了运行本脚本关闭受保护视图。如果 Office 出现需要处理的提示，可取消提示并查看报告；脚本不会绕过安全提示。
+要对照 Mac 上的样子，请使用 Mac 原稿的打印预览或 PDF。上述脚本测量的是同一台 Windows 电脑上两份 Excel 文件的差异。纸张、打印机、缩放、字体和 Excel 版本都会影响结果。两份文件的页数和分页点即使相同，仍要留意文字是否在单元格内换行或被截断。
 
-也可以指定文件和需要核对的字体，例如：
+如果系统策略阻止运行脚本，可以直接打开两份文件，在 Excel 的“文件 → 打印”中核对。若需在单位电脑上运行脚本，请遵循管理员的策略。
+
+## 结果里有哪些信息
+
+| 结果 | 含义 |
+| --- | --- |
+| 工作表的打印页数和分页点相同 | Excel 为这台电脑的当前打印机计算的结果一致 |
+| 打印分页或工作表有变化 | 查找到页数、行列分页点、工作表顺序或可见性差异。窗口会列出具体位置 |
+| 未能完整核对打印分页 | 例如打印机不可用、部分分页点读取失败或工作表过多。报告保留已取得的数据 |
+| 只看到文件的打开结果 | 请核对同一次选择中有原件和唯一的 `.windows.xlsx` 副本。重名和改名的文件需要手动配对 |
+| 单独选择 PPTX | 记录桌面 PowerPoint 能否打开、幻灯片数量和文件指纹。动画和排版请在 PowerPoint 中查看 |
+
+JSON 报告的 `files[].printLayout.sheets` 记录可见工作表的 `pages`、`beforeRows`、`beforeColumns`。隐藏工作表不参与打印分页对照。每个文件最多读取 50 张工作表，每张表最多读取横向及纵向各 128 个分页点。超出时会提示需要人工核对。多个打印区域、图表工作表和特定打印选区仍应通过打印预览复核。`printComparisons` 按原件与副本的文件名配对，`different`、`same`、`unknown` 对应上述三种对照结论。
+
+每份文件还有 `sha256`、`sourceUnchanged` 和对应的 Office 版本。浏览器检查报告独立于桌面报告。脚本全程锁定原件只读，用单独新开的 Excel 实例工作，结束时关闭自己打开的文件，只在没有其他文档时退出新实例。检查期间请等本次操作结束再操作检查窗口。
+
+也可以像下面这样指定路径、要核对的字体和新报告位置。
 
 ```powershell
-.\scripts\verify-windows.ps1 -Path 'C:\Documents\演示文稿.windows.pptx' -TargetFonts 'Arial','Microsoft YaHei'
+.\scripts\verify-windows.ps1 -Path 'C:\Documents\预算.xlsx','C:\Downloads\预算.windows.xlsx' -TargetFonts 'Arial','Microsoft YaHei' -OutputPath 'C:\Documents\分页对照.json'
 ```
 
-多文件建议使用前面的选择框。自定义输出位置可以加 `-OutputPath 'C:\Documents\Windows-check.json'`；输出目录需要已经存在。脚本会在打开 Office 之前拒绝与输入相同的路径、已有文件、网络输出路径和 Windows 保留文件名，并在最终写入时再次使用“只创建新文件”方式，避免覆盖已有成果。
-
-## 怎么看结果
-
-| 字段 | 含义 |
-| --- | --- |
-| `fileName` / `sha256` | 被检查的文件名与内容指纹，可与浏览器报告对应 |
-| `windowsVersion` / `officeVersion` / `officeBuild` | 本次实际使用的环境；结论不自动适用于另一台电脑或另一个 Office 版本 |
-| `actualOfficeOpenPerformed` | 是否实际调用了 Office 的打开方法；前置检查拒绝时为 false |
-| `openedSuccessfully` | Office 是否返回了文档对象并读到了页数或工作表数量 |
-| `slideCount` / `sheetCount` | 幻灯片数 / 普通工作表数，不含宏工作表；不是内容完整性比较 |
-| `sourceUnchanged` | 前后 SHA-256 是否一致；脚本也在检查期间保持原文件只读锁 |
-| `visualConsistencyVerified` 等字段 | 固定为 false：本脚本没有做版面比较、计算正确性验证、编辑测试或动画播放 |
-| `targetFonts` | 可选字体家族名称是否能被 Windows 字体清单找到，同时核对系统默认、英文及简繁中文名称；不验证中文字形是否齐全、云字体、实际替换或排版效果 |
-| `error` / `cleanupNote` | 失败原因，以及是否需要手动关闭此次检查留下的 Office 窗口 |
-
-首次运行失败时，先看 `error`。未安装对应桌面 Office、已有 Office 进程、外部链接、受保护视图或 Office 初始化提示，都可能使自动检查无法完成；这不等同于文件损坏。
+字体检查记录 Windows 已安装字体的家族名。对照范围覆盖中文本地名和英文名，实际字形、云字体和 Office 的自动替换需要在源文件中核对。报告需要保存到已有本地目录中的新文件名。
 
 ## 为什么部分文件会拒绝自动打开
 
@@ -51,33 +48,11 @@ Excel 的 `UpdateLinks=0` 只约束工作簿链接更新，不能被当成对所
 
 Excel 和 PowerPoint 均设置 `AutomationSecurity=3`，关闭通过自动化打开文件时的宏。微软特别说明，这一设置**不会单独禁用 Excel 4.0 宏**，所以脚本还预先拒绝相关部件和名称。[Excel 宏自动化设置](https://learn.microsoft.com/en-us/office/vba/api/excel.application.automationsecurity) · [PowerPoint 宏自动化设置](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.application.automationsecurity)
 
-PowerPoint 使用只读、隐藏窗口方式打开，随后关闭且不保存；方法含义见 [Presentations.Open](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.presentations.open)。此脚本不会导出图片、PDF 或视频，也不会对公式、宏、加载项和媒体执行测试。
+PowerPoint 使用只读、隐藏窗口方式打开，随后关闭文稿。图片、PDF、视频导出和动画播放需要在桌面应用中另行操作。[PowerPoint 的打开方法](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.presentations.open)
 
-## 会不会影响正在做的工作
 
-运行前必须关闭 Excel 与 PowerPoint。每个文件检查都新建一个应用会话，核对它的窗口所属进程与启动时间；检查结束只关闭自己的文档，只有该新会话已没有其他文档时才请求退出。无法确认归属、发现其他文档，或关闭失败时，会保留进程并写入说明。脚本不使用强制终止进程命令。
+## 验证记录
 
-如果在检查期间另外打开 Office，仍存在竞争情况，所以不要同时操作这些应用。Office 还可能加载你原本配置的启动加载项；这个脚本不是安全沙盒，适合检查你自己制作和信任的文档。它不会更改系统或 Office 的信任中心策略。
+正式版开发期间，在 Windows 11 的桌面 Excel、PowerPoint 中测试了同名工作簿配对、文件只读打开和原件指纹。Excel 检查涵盖了由 3 页变为 4 页的长表、保持单页的 Numbers 导出工作簿，以及总页数相同但换页位置从第 18 行移动到第 21 行的样本。另核对隐藏工作表跳过、格式损坏返回“未能完整核对”和只选较少影响排版的位置后分页稳定。测试保留系统的脚本执行策略，通过 Windows PowerShell 5.1 在内存中运行同一份检查器正文。若策略禁用从磁盘运行脚本，可用 Excel 的打印预览完成手工对照。
 
-## 当前验证状态与开发者检查
-
-此脚本在 macOS 上编写。**尚未在装有桌面 Office 的 Windows 电脑上完成实际打开测试，因此当前作为可选实验功能提供。** 语法解析或在未安装 Office 的 Windows 上得到预期拒绝，都不能冒充 Office 打开验证。
-
-2026-10-25 已在 Windows 虚拟机的 **Windows PowerShell 5.1.26100.9457** 中通过内存语法解析和前置检查测试：合成普通工作簿可通过包检查，包含连接的包会被拒绝，空输入路径、同名输出路径与 Windows 保留文件名会被拒绝；未安装 Excel / PowerPoint 时，安装检查会按预期拒绝。字体清单测试也确认，中文 Windows 需要核对本地化家族名称，脚本已覆盖这一情况。测试没有启动 Office，也没有更改虚拟机设置。真实 Office 打开行为仍待具有桌面 Office 的环境验证。
-
-同日直接运行完整 `.ps1` 文件时，当前虚拟机的脚本执行策略在启动前拒绝了请求，没有生成 Office 验证报告，也没有更改或绕过该策略。这不影响离线 HTML 应用使用；普通用户可直接用目标 Office 人工打开并核对副本。
-
-开发者可在 Windows PowerShell 中执行下面的只读语法检查；这不会运行脚本或启动 Office：
-
-```powershell
-$tokens = $null
-$parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile(
-    (Resolve-Path '.\scripts\verify-windows.ps1').Path,
-    [ref]$tokens,
-    [ref]$parseErrors
-)
-if ($parseErrors.Count) { $parseErrors | Format-List; exit 1 }
-```
-
-仓库的 `.github/workflows/ci.yml` 已包含同样的 Windows PowerShell 5.1 解析检查，也会检查中文脚本所需的 UTF-8 BOM。CI 使用 Node.js 24 在 Windows、macOS 和 Linux 上运行测试与构建，不发布或上传本地 `work` 内容。通用 CI 机器通常没有桌面 Office；要获得真实打开证据，需要用户自己的 Windows Office 环境，或配置了 Office 的专用测试电脑。
+GitHub 的 Windows 测试另外使用 Windows PowerShell 解析脚本并核对 UTF-8 BOM。普通 CI 机器没有桌面 Office，其结果不能代替真实的排版验证。[项目测试记录](TESTING.md)

@@ -383,3 +383,67 @@ test('repairing a reordered, editable presentation preserves private-use logos, 
   assert.equal(repaired.report.inventory.chartCount, 1);
   assert.equal(repaired.report.validation.windowsOfficeTested, false);
 });
+
+test('layout review identifies the exact text box or native table cell for a font without inventing rendered clipping', () => {
+  const family = name => textShape().replace('<a:rPr sz="2400"/>', `<a:rPr sz="2400">${font(name)}</a:rPr>`);
+  const clipped = family('Helvetica').replace('<a:bodyPr ', '<a:bodyPr vertOverflow="ellipsis" ').replace('示例文本框', '页脚');
+  const shrinking = family('Menlo').replace('noAutofit', 'normAutofit').replace('示例文本框', '金额');
+  const cell = name => `<a:tc><a:txBody><a:bodyPr/><a:p><a:pPr><a:defRPr>${font(name)}</a:defRPr></a:pPr><a:r><a:t>例</a:t></a:r></a:p></a:txBody></a:tc>`;
+  const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="预算表"/></p:nvGraphicFramePr><a:graphic><a:graphicData uri="${NS.a}/table"><a:tbl><a:tr>${cell('Arial')}${cell('Monaco')}</a:tr><a:tr>${cell('Times').replace('<a:tc>', '<a:tc vMerge="1">')}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+  const theme = drawing(font('Helvetica'));
+  const result = scanPptx(context({ 'ppt/slides/slide1.xml': slide(clipped + shrinking + table), 'ppt/theme/theme1.xml': theme }));
+  const review = name => result.issues.find(i => i.part.includes('slides/') && i.fix?.from === name)?.layoutReview;
+  assert.match(review('Helvetica'), /页脚.*被截去/);
+  assert.match(review('Menlo'), /金额.*缩小文字/);
+  assert.match(review('Monaco'), /预算表第 1 行第 2 列/);
+  assert.equal(review('Times'), undefined);
+  assert.equal(result.issues.find(i => i.part.includes('/theme/') && i.fix)?.layoutReview, undefined);
+  assert.ok(result.issues.filter(i => i.fixable).every(i => !i.defaultSelected));
+});
+
+test('explicit margins can consume the text area even with inherited sizes; multi-column text is not measured as one column', () => {
+  const height = 36 * 12700;
+  const empty = textShape({ width: 36 * 12700, height, size: null, bodyAttributes: `lIns="${18 * 12700}" rIns="${18 * 12700}" tIns="${18 * 12700}" bIns="${18 * 12700}"` });
+  const columns = textShape({ height, lines: 2, size: 2400, bodyAttributes: 'numCol="2" tIns="0" bIns="0"' });
+  const result = scanPptx(context({ 'ppt/slides/slide1.xml': slide(empty), 'ppt/slides/slide2.xml': slide(columns) }));
+  const finding = result.issues.find(i => i.code === 'PPTX_TEXT_NO_INNER_SPACE');
+  assert.match(finding.description, /水平方向和垂直方向/);
+  assert.match(finding.evidence, /36\.0 磅/);
+  assert.equal(result.issues.filter(i => i.code === 'PPTX_TEXT_OVERFLOW_HEURISTIC').length, 0);
+  assert.equal(result.inventory.heuristicChecks.explicitLineHeightChecks, 0);
+});
+
+test('one slide can change ordinary or bounded declarations of the same family independently and preserve all other bytes', async () => {
+  const entries = readArchive(createDemo('pptx')).entries;
+  const part = 'ppt/slides/slide1.xml';
+  const text = new TextDecoder().decode(entries.get(part));
+  const fixed = textShape().replace('示例文本框', '窄框甲')
+    .replace('<a:lstStyle/>', `<a:lstStyle><a:lvl1pPr><a:defRPr>${font('PingFang SC')}</a:defRPr></a:lvl1pPr></a:lstStyle>`)
+    .replace('<a:rPr sz="2400"/>', `<a:rPr sz="2400">${font('PingFang SC')}</a:rPr>`);
+  const encoder = new TextEncoder();
+  const addFixed = xml => xml.replace('</p:spTree>', fixed + '</p:spTree>');
+  const original = addFixed(text);
+  entries.set(part, encoder.encode(original));
+  const input = writeArchive(entries);
+  const report = await analyzeOffice(input, 'boxes.pptx');
+  const choices = report.issues.filter(i => i.part === part && i.fix?.from === 'PingFang SC');
+  assert.deepEqual(choices.map(i => i.fix.layoutScope), ['other', 'bounded']);
+  const [ordinary, bounded] = choices;
+  assert.match(bounded.location, /第 1 张幻灯片.*需复核排版/);
+  assert.match(bounded.layoutReview, /窄框甲/);
+  assert.equal(ordinary.layoutReview, undefined);
+  const swap = xml => xml.replaceAll('typeface="PingFang SC"', 'typeface="Microsoft YaHei"');
+  for (const [ids, expected] of [
+    [[ordinary.id], addFixed(swap(text))],
+    [[bounded.id], text.replace('</p:spTree>', swap(fixed) + '</p:spTree>')],
+    [[ordinary.id, bounded.id], swap(original)],
+  ]) {
+    const repaired = await repairOffice(input, 'boxes.pptx', { selectedIssueIds: ids });
+    const output = readArchive(repaired.bytes).entries;
+    assert.deepEqual(output.get(part), encoder.encode(expected));
+    for (const [name, before] of entries) if (name !== part) assert.deepEqual(output.get(name), before, name);
+    assert.deepEqual(repaired.changes.map(change => change.count).sort(), ids.map(id =>
+      id === bounded.id ? 2 : (text.match(/typeface="PingFang SC"/g) || []).length).sort());
+  }
+  assert.deepEqual(readArchive(input).entries.get(part), encoder.encode(original));
+});
