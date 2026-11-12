@@ -243,7 +243,7 @@ function run(args) {
         Object.keys(result).forEach(k=>item[k]=result[k]);
         if(result.error||result.cleanupNote)officeBlocked=true;
         if(result.pdfExported)try{item.pdf=pdfPayload(pdf,basename(c.path).replace(/\.[^.]+$/,'.pdf'));item.renderedFontFamilies=observedFontFamilies(pdf,c.stats.requestedFonts);}catch(e){item.pdfExported=false;item.pdfError=String(e.message||e);}
-      }catch(e){officeBlocked=true;item.error=String(e.message||e).replace(folder,'本次结果文件夹').slice(0,1200);}
+      }catch(e){officeBlocked=true;item.error=String(e.message||e).split(folder).join('本次结果文件夹').split(bundle).join('OfficeBridge 程序文件夹').slice(0,1200);}
       finally{try{item.sourceUnchanged=sha(c.path)===hash;}catch(_){item.sourceUnchanged=false;}}
       report.documents.push(item);
     }
