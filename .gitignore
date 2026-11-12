@@ -13,4 +13,6 @@ officebridge-reports/
 *.兼容报告.html
 *.windows.[pP][pP][tT][xX]
 *.windows.[xX][lL][sS][xX]
+*.mac.[pP][pP][tT][xX]
+*.mac.[xX][lL][sS][xX]
 ~$*

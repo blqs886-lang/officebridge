@@ -230,7 +230,7 @@ function scanOtherFormulas(ctx, add) {
     }
     if (grouped.recent.length) add('OTHER_FORMULA_VERSION', part, {
       severity: 'warning', title: '条件、验证或表公式需要核对软件版本',
-      description: '单元格以外的公式使用未来函数标记或较新的函数。现代 Windows Excel 可能支持，老版本或其他软件仍需验证；不能据此认定公式错误。',
+      description: '单元格以外的公式使用未来函数标记或较新的函数。现代 Excel 可能支持，老版本或其他软件仍需验证；不能据此认定公式错误。',
       evidence: compact(sample(grouped.recent), 800), recommendation: '在目标软件中检查条件格式、数据验证和表公式是否仍按预期工作。',
     });
     if (grouped.dependent.length) add('OTHER_FORMULA_DEPENDENCY', part, {
@@ -366,7 +366,7 @@ function scanFonts(ctx, add, inventory, privateStyleFonts, defaultNames, cellFon
           severity: 'info', title: `字体「${name}」尚未验证`,
           description: ctx.options?.targetFonts?.length
             ? '导入的目标电脑字体名单未列出此名称。其他语言的名称和 Office 云字体可能另外可用；请核对实际显示。'
-            : '无法从文件确认目标 Windows 电脑是否安装此字体。缺失时可能发生替换、换行或表格文字截断。',
+            : `无法从文件确认目标 ${ctx.options?.fontProfile === 'mac-office' ? 'Mac' : 'Windows'} 电脑是否安装此字体。缺失时可能发生替换、换行或表格文字截断。`,
           evidence: `在此部件中发现 ${count} 处字体声明。`,
           recommendation: '在目标电脑安装获得授权的字体，或在原始 Excel 中更换为接收方确认可用的字体。',
         });
@@ -422,7 +422,7 @@ function scanWorkbook(ctx, add, inventory) {
     const features = formulaFeatures(definedName.textContent ?? '');
     if (features.recent.length) add('NAMED_FORMULA_VERSION', part, {
       severity: 'warning', title: '名称公式需要核对目标软件版本',
-      description: '此名称使用未来函数标记或较新的函数。这不是公式损坏的证明，当前 Windows Excel 可能支持；老版本或其他表格软件需另行验证。',
+      description: '此名称使用未来函数标记或较新的函数。这不是公式损坏的证明，当前 Excel 可能支持；老版本或其他表格软件需另行验证。',
       evidence: `名称：${compact(name)}；函数：${[...new Set(features.recent)].join('、')}。`,
       recommendation: '在接收方实际使用的 Excel 版本中计算并核对结果，保留原公式。',
     });
@@ -556,8 +556,12 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
         if (Number.isFinite(height) && lines * fontSize * 1.2 > height * 1.2) mark('WRAPPED_TEXT_HEIGHT_HEURISTIC', ref);
       }
     }
-    if (wrap || fitSetting || likelyClipped) {
-      const constrained = likelyClipped || fitSetting || merged || isTrue(attribute(row, 'customHeight', fixedDefaultHeight));
+    // Fixed height and merged geometry can clip even a single unwrapped line
+    // after substitution. Keep their font declarations out of ordinary choices;
+    // actual fit still requires the target Excel renderer, not a width guess.
+    const fixedHeight = isTrue(attribute(row, 'customHeight', fixedDefaultHeight));
+    if (wrap || fitSetting || likelyClipped || merged || fixedHeight) {
+      const constrained = likelyClipped || fitSetting || merged || fixedHeight;
       const affected = constrained ? cellFontUse.constrained : cellFontUse.autoHeight;
       const shared = type === 's' ? strings[Number(raw)] : null;
       const used = shared
@@ -600,7 +604,7 @@ function scanSheet(ctx, part, doc, name, styles, strings, add, inventory, privat
   });
 
   const definitions = {
-    FORMULA_VERSION_REQUIREMENT: ['warning', '公式需要核对目标软件版本', '发现未来函数标记或较新的函数；这是版本依赖提示，不代表公式损坏或 Windows 不支持。当前 Excel、旧版 Excel、WPS 等支持范围可能不同。', '在接收方实际使用的软件版本中重算并核对结果，保留原公式。'],
+    FORMULA_VERSION_REQUIREMENT: ['warning', '公式需要核对目标软件版本', `发现未来函数标记或较新的函数；这是版本依赖提示，不代表公式损坏或 ${ctx.options?.fontProfile === 'mac-office' ? 'Mac' : 'Windows'} 不支持。当前 Excel、旧版 Excel、WPS 等支持范围可能不同。`, '在接收方实际使用的软件版本中重算并核对结果，保留原公式。'],
     FORMULA_ENVIRONMENT_DEPENDENCY: ['warning', '公式依赖在线服务、数据源或加载项', '部分公式可能需要网络、许可、数据源或本机加载项。移动文件本身不会携带所有运行条件。', '在目标电脑配置所需的数据源、许可或加载项，并核对刷新后的结果。'],
     EXTERNAL_WORKBOOK_FORMULA: ['warning', '公式引用外部工作簿', '公式依赖另一个工作簿。换电脑后，路径、访问权限或源文件可能不同；缓存结果不保证仍然最新。', '一同提供所需源文件，在目标 Excel 中检查链接并重新计算。'],
     FORMULA_FILE_HYPERLINK: ['warning', '公式中的附件或本机链接可能打不开', 'HYPERLINK 公式写入了固定文件路径或本机服务地址。工作簿不会随附链接指向的文件；点击链接是否可用，取决于接收方的目录、权限或服务。', '一同发送附件并保留相对目录，或在原始 Excel 中更新链接，再到目标电脑打开确认。工具不访问链接、不改写公式。'],
@@ -696,7 +700,7 @@ function scanPackageFeatures(ctx, add, inventory) {
         severity: 'warning', title: '数据连接需要目标电脑环境',
         description: '刷新可能依赖驱动、数据源、网络或登录状态。复制文件不能保证这些依赖可用，当前缓存不等同于刷新成功。',
         evidence: `连接名称：${compact(attribute(connection, 'name', '未命名'))}。`,
-        recommendation: '在目标 Windows Excel 中验证连接、驱动与刷新权限。',
+        recommendation: '在目标 Excel 中验证连接、驱动与刷新权限。',
       });
     }
     const dynamic = elements(doc, DYNAMIC_NS, 'dynamicArrayProperties').filter(node => isTrue(attribute(node, 'fDynamic')));

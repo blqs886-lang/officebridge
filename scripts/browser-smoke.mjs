@@ -499,7 +499,7 @@ try {
     const otherPath = await downloadCustom('#download-json', 'custom-other-file.json');
     assert.deepEqual(JSON.parse(await fs.readFile(otherPath, 'utf8')).analysisOptions.fontMappings, {});
     await custom.locator('.file-card').filter({ hasText: 'custom-font.xlsx' }).click();
-    await custom.locator('.font-choice').filter({ hasText: 'OfficeBridge Test Font' }).locator('[data-issue-id]').check();
+    await custom.locator('.font-choice').filter({ hasText: 'OfficeBridge Test Font' }).locator('[data-font-group], [data-issue-id]').first().check();
     await custom.locator('#repair-file').click();
     await custom.locator('#download-repaired').waitFor();
     const afterPath = await downloadCustom('#download-json', 'custom-after-repair.json');
@@ -751,7 +751,19 @@ try {
     await attach(1, '原稿复核.pdf', original);
     await verdict('未见明显图像差异');
     assert.match(await compare.locator('#proof-status').innerText(), /2 页.*2 页/);
+    await compare.locator('#proof-scan').click();
+    await compare.waitForFunction(() => document.querySelector('#proof-scan-status').textContent.includes('已核对 2 / 2 页'));
+    assert.match(await compare.locator('#proof-scan-status').innerText(), /0 页有差异/);
+    assert.equal(await compare.locator('.proof-page-result.unchanged').count(), 2);
     await attach(1, '位移.pdf', different);
+    await verdict('本页预览有差异');
+    assert.equal(await compare.locator('.proof-page-result').count(), 0);
+    await compare.locator('#proof-scan').click();
+    await compare.waitForFunction(() => document.querySelector('#proof-scan-status').textContent.includes('已核对 2 / 2 页'));
+    assert.match(await compare.locator('#proof-scan-status').innerText(), /2 页有差异/);
+    await compare.getByRole('button', {name:'查看第 2 页：一份缺页', exact:true}).click();
+    await verdict('只有一份文件');
+    await compare.getByRole('button', {name:'查看第 1 页：预览有差异', exact:true}).click();
     await verdict('本页预览有差异');
     assert.match(await compare.locator('#proof-status').innerText(), /少 1 页/);
     const normalWidth = (await compare.locator('.proof-paper').first().boundingBox()).width;
@@ -832,6 +844,11 @@ try {
     await attach(0, '红.pdf', imageProof(Buffer.from(red, 'base64'), '/Filter /JPXDecode'));
     await attach(1, '蓝.pdf', imageProof(Buffer.from(blue, 'base64'), '/Filter /JPXDecode'));
     await verdict('无法判断排版差异');
+    await compare.locator('#proof-scan').click();
+    await compare.waitForFunction(() => document.querySelector('#proof-scan-status').textContent.includes('已核对 1 / 1 页'));
+    assert.match(await compare.locator('#proof-scan-status').innerText(), /1 页有差异或需要人工确认/);
+    assert.equal(await compare.locator('.proof-page-result.unchanged').count(), 0);
+    assert.match(await compare.locator('.proof-page-result').innerText(), /未能完整读取/);
     assert.match(await compare.locator('#proof-status').innerText(), /1 页.*1 页/);
     assert.ok(await compare.locator('#proof-overlay-control').isHidden());
     await attach(0, '普通红.pdf', rawRed);
@@ -856,9 +873,145 @@ try {
     await compare.close();
   });
 
+  await test('连续逐页核对可以停止，更换 PDF 会清除旧结果', async () => {
+    const source = await context.newPage();
+    await source.setContent('<style>@page{size:A4}section+section{break-before:page}</style>' + Array.from({length:30},(_,i)=>`<section><h1>Page ${i+1}</h1></section>`).join(''));
+    const pdf = await source.pdf({preferCSSPageSize:true});
+    await source.close();
+    const view = await context.newPage();
+    await view.addInitScript(() => {
+      const original = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...rest) => original(callback,
+        delay === 30000 && window.__testStaleDeadline ? 1500 : delay === 0 && window.__slowPageScan ? 200 : delay, ...rest);
+      const WorkerClass = window.Worker;
+      window.Worker = class extends WorkerClass {
+        postMessage(message, ...rest) {
+          if (window.__stallSecondPage && message?.action === 'GetOperatorList' && message.data?.pageIndex === 1) {
+            window.__stallSecondPage = false; window.__pageStalled = true; return;
+          }
+          return super.postMessage(message, ...rest);
+        }
+      };
+    });
+    await view.goto(baseUrl);
+    await view.locator('#pdf-compare > summary').click();
+    for (const side of [0,1]) await view.locator('#proof-'+side).setInputFiles({name:'many-pages.pdf',mimeType:'application/pdf',buffer:pdf});
+    await view.waitForFunction(()=>document.querySelector('#proof-verdict').textContent.includes('未见明显'));
+    await view.evaluate(()=>{window.__slowPageScan=true;});
+    await view.locator('#proof-scan').click();
+    await view.locator('.proof-page-result').first().waitFor();
+    await view.locator('#proof-scan-stop').click();
+    assert.match(await view.locator('#proof-scan-status').innerText(),/已停止/);
+    assert.ok(await view.locator('.proof-page-result').count() < 30);
+    await view.locator('#proof-1').setInputFiles({name:'replacement.pdf',mimeType:'application/pdf',buffer:pdf});
+    await view.waitForFunction(()=>document.querySelector('#proof-verdict').textContent.includes('未见明显'));
+    assert.equal(await view.locator('.proof-page-result').count(),0);
+    assert.equal(await view.locator('#proof-scan-status').innerText(),'');
+    assert.equal(await view.locator('#proof-scan').isEnabled(),true);
+    await view.evaluate(()=>{window.__testStaleDeadline=window.__stallSecondPage=true;});
+    await view.locator('#proof-page').fill('2');
+    await view.locator('#proof-page').dispatchEvent('change');
+    await view.waitForFunction(()=>window.__pageStalled);
+    await view.locator('#proof-page').fill('1');
+    await view.locator('#proof-page').dispatchEvent('change');
+    await view.waitForFunction(()=>document.querySelector('#proof-verdict').textContent.includes('未见明显'));
+    await view.evaluate(()=>new Promise(resolve=>setTimeout(resolve,1800)));
+    assert.doesNotMatch((await view.locator('.proof-info').allTextContents()).join(''),/耗时过长/);
+    assert.match(await view.locator('#proof-verdict').innerText(),/未见明显/);
+    await view.close();
+  });
+
+  await test('两个接收系统独立检查，改变方向后清空旧选择并生成 Mac 副本', async () => {
+    const reverse = await context.newPage();
+    await reverse.goto(baseUrl);
+    await reverse.locator('#target-platform').selectOption('mac-office');
+    await reverse.locator('#demo-xlsx').click();
+    await reverse.locator('#repair-file').waitFor();
+    assert.equal(await reverse.locator('#record-target').inputValue(), 'mac-office');
+    assert.match(await reverse.locator('.font-choice-list').innerText(), /Microsoft YaHei|Segoe UI/);
+    await reverse.locator('#select-lower-risk').click();
+    const output = await clickDownload('#repair-file', 'mac-demo.xlsx', reverse);
+    assert.match(await reverse.locator('.repaired-name').innerText(), /\.mac\.xlsx$/);
+    const report = await analyzeOffice(new Uint8Array(await fs.readFile(output)), 'mac-demo.xlsx', {fontProfile:'mac-office'});
+    assert.equal(report.analysisOptions.fontProfile, 'mac-office');
+    assert.equal(report.repairBlocked, false);
+    await reverse.locator('#record-target').selectOption('windows-office');
+    await reverse.waitForFunction(() => document.querySelector('#record-target')?.value === 'windows-office' && !document.querySelector('#record-target').disabled);
+    assert.equal(await reverse.locator('[data-issue-id]:checked').count(), 0);
+    assert.equal(await reverse.locator('#download-repaired').count(), 0);
+    await reverse.close();
+  });
+
+  await test('本机 Office 助手结果自动显示真实 PDF，受损记录可恢复且文件名作为文字显示', async () => {
+    const sample = await context.newPage();
+    await sample.setContent('<p style="font:24px sans-serif">OfficeBridge native proof 2026</p>');
+    const pdf = await sample.pdf();
+    await sample.close();
+    const report = {schema:'officebridge-native-check',schemaVersion:1,createdAt:'2026-11-12T00:00:00Z',environment:{platform:'macos'},documents:[
+      {role:'original',format:'xlsx',fileName:'Budget.xlsx',sha256:'a'.repeat(64),openedSuccessfully:true,sourceUnchanged:true,officeApplication:'Excel',officeVersion:'QA',
+        pdf:{fileName:'before.pdf',base64:pdf.toString('base64'),sha256:createHash('sha256').update(pdf).digest('hex')}},
+      {role:'copy',format:'xlsx',fileName:'Budget.mac.xlsx',sha256:'b'.repeat(64),openedSuccessfully:true,sourceUnchanged:true,officeApplication:'Excel',officeVersion:'QA',
+        pdf:{fileName:'after.pdf',base64:pdf.toString('base64'),sha256:createHash('sha256').update(pdf).digest('hex')}}],
+      comparisons:[{details:['The tested worksheet has the same page count.']}]};
+    const view = await context.newPage();
+    await view.goto(baseUrl);
+    await view.locator('#native-check > summary').click();
+    await view.locator('#native-check details > summary').click();
+    const attach = data => view.locator('#native-report-input').setInputFiles({name:'check.officebridge-check.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(data))});
+    report.environment.fontFamilies=['Microsoft YaHei','Segoe UI','PingFang SC','Helvetica Neue','Arial','Calibri'];
+    await attach(report);
+    await view.waitForFunction(() => document.querySelector('#proof-verdict')?.innerText.includes('未见明显'));
+    assert.match(await view.locator('#native-results').innerText(), /Mac Office.*已成功打开/s);
+    assert.match(await view.locator('#proof-status').innerText(), /Mac 原件.*Mac 副本/);
+    await view.locator('.native-fonts > summary').click();
+    const fontFile = await clickDownload('#native-font-download','native-office-fonts.txt',view);
+    assert.match(await fs.readFile(fontFile,'utf8'),/Microsoft YaHei/);
+    await view.locator('#target-platform').selectOption('mac-office');
+    assert.match(await view.locator('label[for="proof-1"]').innerText(),/Mac 副本/);
+    await view.locator('#demo-xlsx').click();
+    await view.locator('#font-settings > summary').click();
+    await view.locator('#font-list-input').setInputFiles(fontFile);
+    await view.waitForFunction(()=>document.querySelector('#font-comparison')?.textContent.includes('已核对 6 个'));
+    assert.equal(await view.locator('[data-issue-id]').count(),0,'Available Office fonts must not be offered for unnecessary replacement');
+    const bad = structuredClone(report);
+    bad.documents[0].pdf.sha256 = '0'.repeat(64);
+    await attach(bad);
+    await view.waitForFunction(() => document.querySelector('#native-import-status').innerText.includes('指纹不一致'));
+    report.documents[0].fileName = '<img src=x onerror=alert(1)>.xlsx';
+    await attach(report);
+    await view.waitForFunction(() => document.querySelector('#native-import-status').innerText.includes('已打开'));
+    assert.equal(await view.locator('#native-results img').count(),0);
+    assert.match(await view.locator('#native-results').innerText(), /<img/);
+    const unread = structuredClone(report);
+    Object.assign(unread.documents[0],{openedSuccessfully:false,sourceUnchanged:false,sha256:null,pdf:null,error:'文件被占用，请关闭后重新核对。'});
+    await attach(unread);
+    await view.waitForFunction(()=>document.querySelector('#native-results').textContent.includes('文件被占用'));
+    assert.match(await view.locator('#native-results').innerText(),/未完成项目/);
+    assert.match(await view.locator('label[for="proof-1"]').innerText(),/Mac 副本/);
+    assert.equal(await view.locator('#proof-0').evaluate(e=>e.files.length),0);
+    await attach(report);
+    await view.waitForFunction(()=>document.querySelector('#proof-verdict').textContent.includes('未见明显'));
+    await view.setViewportSize({width:320,height:740});
+    assert.ok(await view.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await view.close();
+    if (isLocalFile) {
+      const html = await fs.readFile(new URL(baseUrl), 'utf8');
+      const end = html.lastIndexOf('</body>');
+      const safe = JSON.stringify(report).replaceAll('<', '\\u003c');
+      const resultPath = path.join(outputDir, 'native-result.html');
+      await fs.writeFile(resultPath, html.slice(0,end) + '<script type="application/json" id="officebridge-native-data">' + safe + '</script>' + html.slice(end));
+      const automatic = await context.newPage();
+      await automatic.goto(pathToFileURL(resultPath).href);
+      await automatic.waitForFunction(() => document.querySelector('#proof-verdict')?.innerText.includes('未见明显'));
+      assert.equal(await automatic.locator('#officebridge-native-data').count(),0);
+      assert.match(await automatic.locator('#native-results').innerText(), /<img/);
+      await automatic.close();
+    }
+  });
+
   await test('检查及修复过程没有文档上传或第三方请求', async () => {
     const base = new URL(baseUrl);
-    const localReports = new Set(['report.html', 'long-path-report.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));
+    const localReports = new Set(['report.html', 'long-path-report.html', 'native-result.html'].map((name) => pathToFileURL(path.join(outputDir, name)).href));
     const excludedBrowserInternalRequests = requests.filter(isBrowserInternalRequest);
     const checkedRequests = requests.filter((request) => !isBrowserInternalRequest(request));
     const unexpectedRequests = checkedRequests.filter((request) => !isExpectedAppRequest(request, base, localReports));

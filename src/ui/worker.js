@@ -11,7 +11,7 @@ self.addEventListener('message', async ({ data }) => {
       const result = await repairOffice(bytes, fileName, options);
       self.postMessage({ id, result }, [result.bytes.buffer]);
     } else if (type === 'demo') {
-      const result = await createDemo(data.format);
+      const result = await createDemo(data.format, data.options);
       self.postMessage({ id, result }, [result.buffer]);
     } else {
       throw new Error('不支持的处理请求。');

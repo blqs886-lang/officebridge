@@ -236,3 +236,36 @@ test('invalid option combinations are usage failures with no filesystem writes',
   }
   assert.deepEqual(await readdir(directory), []);
 });
+
+test('Mac CLI target checks and repairs to a distinct copy while preserving the original', async t => {
+  const directory = await temporary(t);
+  const bytes = createDemo('xlsx', { fontProfile: 'mac-office' });
+  const input = await source(directory, '跨系统 表格.XLSX', bytes);
+  const checked = await cli(directory, ['check', input, '--target', 'mac', '--out', 'checks']);
+  assert.equal(checked.code, 0, checked.stderr);
+  const original = await json(path.join(directory, 'checks/跨系统 表格.XLSX.report.json'));
+  assert.equal(original.analysisOptions.fontProfile, 'mac-office');
+  assert.equal(original.validation.targetPlatform, 'mac');
+  const repaired = await cli(directory, ['repair', input, '--target=mac', '--accept-font-substitutions', '--out', 'repairs']);
+  assert.equal(repaired.code, 0, repaired.stderr);
+  assert.match(repaired.stdout, /未进行 Mac Office 实测/);
+  const report = await json(path.join(directory, 'repairs/跨系统 表格.mac.XLSX.report.json'));
+  assert.equal(report.analysisOptions.fontProfile, 'mac-office');
+  assert.equal(report.validation.targetOfficeTested, false);
+  assert.equal(report.repair.originalSha256, hash(bytes));
+  assert.ok(report.repair.changes.some(change => change.after === 'PingFang SC'));
+  assert.ok(report.repair.changes.some(change => change.after === 'Helvetica Neue'));
+  const output = await readFile(path.join(directory, 'repairs/跨系统 表格.mac.XLSX'));
+  assert.equal(hash(output), report.sha256);
+  assert.equal(hash(await readFile(input)), hash(bytes));
+});
+
+test('CLI rejects unsupported and missing targets before creating any output', async t => {
+  const directory = await temporary(t);
+  for (const args of [['--target', 'linux'], ['--target'], ['--target='], ['--target=Mac']]) {
+    const result = await cli(directory, ['input.pptx', ...args]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /--target.*windows.*mac/);
+  }
+  assert.deepEqual(await readdir(directory), []);
+});

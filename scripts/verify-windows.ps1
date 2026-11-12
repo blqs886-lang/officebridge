@@ -4,7 +4,8 @@
 Read-only opening check in installed Windows desktop Excel / PowerPoint.
 .DESCRIPTION
 Does not save documents, recalculate formulas, refresh connections, install fonts,
-change Trust Center policy, export previews, or establish visual equivalence.
+change Trust Center policy or establish visual equivalence. The native helper
+can request PDF export and text measurements through the shared functions.
 Checks Excel printer pagination for matching original and .windows workbooks.
 Uses only a newly created Office process. See docs/WINDOWS-VERIFICATION.md.
 #>
@@ -12,7 +13,8 @@ Uses only a newly created Office process. See docs/WINDOWS-VERIFICATION.md.
 param(
     [Parameter(Position = 0)] [ValidateNotNullOrEmpty()] [string[]] $Path,
     [ValidateNotNullOrEmpty()] [string] $OutputPath,
-    [ValidateNotNullOrEmpty()] [string[]] $TargetFonts = @()
+    [ValidateNotNullOrEmpty()] [string[]] $TargetFonts = @(),
+    [switch] $LibraryOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -34,6 +36,8 @@ namespace OfficeBridge {
     public static class NativeWindow {
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int command);
     }
 }
 '@
@@ -113,7 +117,7 @@ function Read-PackageXml([IO.Compression.ZipArchiveEntry] $Entry) {
     }
 }
 
-function Assert-LocalPackage([IO.Stream] $Stream, [string] $Extension) {
+function Assert-LocalPackage([IO.Stream] $Stream, [string] $Extension, [bool] $AllowChartWorkbooks = $false) {
     # This conservative preflight is separate from the browser's package check.
     # UpdateLinks=0 does not cover every connection, OLE object, or online formula.
     # Reject such packages before Office opens them rather than claiming they
@@ -121,7 +125,8 @@ function Assert-LocalPackage([IO.Stream] $Stream, [string] $Extension) {
     $archive = $null
     try {
         $Stream.Position = 0
-        $archive = [IO.Compression.ZipArchive]::new($Stream, [IO.Compression.ZipArchiveMode]::Read, $true)
+        try { $archive = [IO.Compression.ZipArchive]::new($Stream, [IO.Compression.ZipArchiveMode]::Read, $true) }
+        catch { throw '文档包已损坏或不是标准的 PPTX / XLSX 文件。请用 Office 打开确认，或重新传输文件。' }
         if ($archive.Entries.Count -gt 5000) { throw '文档部件数量超过检查上限。' }
         $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         [long]$expanded = 0
@@ -134,6 +139,18 @@ function Assert-LocalPackage([IO.Stream] $Stream, [string] $Extension) {
             $expanded += $entry.Length
             if ($entry.Length -gt 100MB -or $expanded -gt 200MB) { throw '文档解压大小超过检查上限。' }
             if ($entry.Length -gt 1MB -and $entry.Length / [Math]::Max(1, $entry.CompressedLength) -gt 300) { throw '文档压缩比例异常，已停止检查。' }
+            if ($AllowChartWorkbooks -and $Extension -eq '.pptx' -and $name -match '^ppt/embeddings/[^/]+\.xlsx$') {
+                $embedded = $entry.Open()
+                try {
+                    # Embedded chart workbooks are data; validate their complete
+                    # package and reject macros/connections before Office opens it.
+                    $memory = New-Object IO.MemoryStream
+                    try { $embedded.CopyTo($memory); Assert-LocalPackage $memory '.xlsx' }
+                    finally { $memory.Dispose() }
+                }
+                finally { $embedded.Dispose() }
+                continue
+            }
             if ($name -match '(?i)(vba(project|data|signature)|/(intl)?macrosheets/|/activeX/|/embeddings/|/externalLinks/|/richData/|/webextensions/|/model/|/(connections|queryTable\d*)\.xml$)') {
                 throw '文件含宏、外部依赖、控件或嵌入对象，请改用 Office 人工检查。'
             }
@@ -151,7 +168,10 @@ function Assert-LocalPackage([IO.Stream] $Stream, [string] $Extension) {
                 }
             }
             foreach ($node in $doc.SelectNodes('//*[local-name()="Relationship"]')) {
-                if ($node.GetAttribute('TargetMode') -eq 'External') { throw '文件含外部关系（包括超链接），不在本次自动打开检查范围内。' }
+                if ($node.GetAttribute('TargetMode') -eq 'External') {
+                    $ordinaryLink = $node.GetAttribute('Type') -eq 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink'
+                    if (!$AllowChartWorkbooks -or !$ordinaryLink) { throw '文件含需联网读取的外部关系，请在 Office 中人工核对。' }
+                }
                 if ($node.GetAttribute('Type') -match '(?i)(vbaProject|xl(intl)?Macrosheet|oleObject|activeX|connections|externalLink|webextension|richdata|richvalue)') { throw '文件含活动内容或外部关系，请人工检查。' }
             }
             if ($doc.SelectNodes('//*[local-name()="connection" or local-name()="queryTable" or local-name()="oleObject" or local-name()="control" or local-name()="externalBook" or local-name()="ddeLink" or local-name()="oleLink"]').Count -gt 0) {
@@ -264,20 +284,51 @@ function Compare-PrintLayout($Original, $Copy) {
     return [pscustomobject]$pair
 }
 
-function Test-OneDocument([string] $InputPath) {
+function Get-SlideTextLayout($Slides) {
+    $result = @()
+    for ($slideIndex = 1; $slideIndex -le [Math]::Min(200, [int]$Slides.Count); $slideIndex++) {
+        $slide = $null
+        try {
+            $slide = $Slides.Item($slideIndex)
+            for ($shapeIndex = 1; $shapeIndex -le [Math]::Min(500, [int]$slide.Shapes.Count); $shapeIndex++) {
+                $shape = $null; $textRange = $null
+                try {
+                    $shape = $slide.Shapes.Item($shapeIndex)
+                    if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
+                    $textRange = $shape.TextFrame.TextRange
+                    $result += [pscustomobject]@{
+                        slide = $slideIndex; shapeId = [int]$shape.Id; name = [string]$shape.Name
+                        lineCount = [int]$textRange.Lines().Count
+                        boundWidth = [Math]::Round([double]$textRange.BoundWidth, 2)
+                        boundHeight = [Math]::Round([double]$textRange.BoundHeight, 2)
+                        frameWidth = [Math]::Round([double]$shape.Width, 2)
+                        frameHeight = [Math]::Round([double]$shape.Height, 2)
+                    }
+                }
+                catch { }
+                finally { Release-ComReference $textRange; Release-ComReference $shape }
+            }
+        }
+        finally { Release-ComReference $slide }
+    }
+    return ,$result
+}
+
+function Test-OneDocument([string] $InputPath, [string] $PdfOutputPath, [string] $OwnershipPath) {
     $result = [ordered]@{
         fileName = $InputPath
         sha256 = $null; sha256After = $null; sourceUnchanged = $null
         openedSuccessfully = $false; actualOfficeOpenPerformed = $false
         officeApplication = $null; officeVersion = $null; officeBuild = $null
         processOwnershipVerified = $false; sheetCount = $null; slideCount = $null
-        printLayout = $null
+        printLayout = $null; textLayout = @(); pdfExported = $false; pdfError = $null
         visualConsistencyVerified = $false; formulaCalculationVerified = $false
         editabilityVerified = $false; animationAndMediaVerified = $false
         error = $null; cleanupNote = $null
     }
     $source = $null; $app = $null; $documents = $null; $document = $null
     $blank = $null; $items = $null; $owned = $false; $startTime = $null
+    $excelState = $null; $initialAutomationSecurity = $null
     try {
         if ([string]::IsNullOrWhiteSpace($InputPath)) { throw '输入文件路径不能为空。' }
         $result.fileName = [IO.Path]::GetFileName($InputPath)
@@ -291,7 +342,7 @@ function Test-OneDocument([string] $InputPath) {
         # or delete this source while Office is inspecting it.
         $source = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $result.sha256 = Get-StreamSha256 $source
-        Assert-LocalPackage $source ($file.Extension.ToLowerInvariant())
+        Assert-LocalPackage $source ($file.Extension.ToLowerInvariant()) ([bool]$PdfOutputPath)
         $progId = if ($file.Extension -ieq '.xlsx') { 'Excel.Application' } else { 'PowerPoint.Application' }
         $processName = if ($file.Extension -ieq '.xlsx') { 'EXCEL' } else { 'POWERPNT' }
         $existingIds = @(Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
@@ -308,21 +359,32 @@ function Test-OneDocument([string] $InputPath) {
             throw '无法确认 Office 进程是本次新建的独立会话，已停止。不会终止任何进程。'
         }
         $owned = $true
-        $app.AutomationSecurity = 3 # msoAutomationSecurityForceDisable
+        if ($OwnershipPath) {
+            $owner = @{ pid = $process.Id; startedUtc = $process.StartTime.ToUniversalTime().ToString('o'); hwnd = [long]$app.HWND }
+            [IO.File]::WriteAllText($OwnershipPath, ($owner | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+        }
+        $initialAutomationSecurity = $app.AutomationSecurity
         $result.processOwnershipVerified = $true
         $result.officeApplication = $progId
         $result.officeVersion = [string]$app.Version
         $result.officeBuild = [string]$process.MainModule.FileVersionInfo.ProductVersion
         if ($file.Extension -ieq '.xlsx') {
+            $documents = $app.Workbooks
+            if ($documents.Count -ne 0) { throw 'Excel 启动时打开了其他工作簿，已停止检查以保护它。' }
+            $excelState = @{
+                Visible = $app.Visible; EnableEvents = $app.EnableEvents
+                DisplayAlerts = $app.DisplayAlerts; AskToUpdateLinks = $app.AskToUpdateLinks
+                CalculateBeforeSave = $app.CalculateBeforeSave; AutomationSecurity = $initialAutomationSecurity
+            }
+            $app.AutomationSecurity = 3 # msoAutomationSecurityForceDisable
             $app.Visible = $false
             $app.EnableEvents = $false
             $app.DisplayAlerts = $false
             $app.AskToUpdateLinks = $false
-            $documents = $app.Workbooks
-            if ($documents.Count -ne 0) { throw 'Excel 启动时打开了其他工作簿，已停止检查以保护它。' }
             # A first blank workbook establishes manual calculation before the
             # real document is opened, regardless of its saved calcMode.
             $blank = $documents.Add(-4167) # xlWBATWorksheet
+            $excelState.Calculation = $app.Calculation
             $app.Calculation = -4135 # xlCalculationManual
             $app.CalculateBeforeSave = $false
             $app.AutomationSecurity = 3
@@ -341,8 +403,21 @@ function Test-OneDocument([string] $InputPath) {
             $document = $documents.Open($file.FullName, -1, 0, 0) # ReadOnly, named, hidden
             $items = $document.Slides
             $result.slideCount = [int]$items.Count
+            if ($PdfOutputPath) { $result.textLayout = Get-SlideTextLayout $items }
         }
         $result.openedSuccessfully = $true
+        if ($PdfOutputPath) {
+            try {
+                if (Test-Path -LiteralPath $PdfOutputPath) { throw '预览文件已存在，请使用新的结果文件夹。' }
+                if ($file.Extension -ieq '.xlsx') { $document.ExportAsFixedFormat(0, $PdfOutputPath) }
+                else {
+                    $document.SaveCopyAs($PdfOutputPath, 32) # ppSaveAsPDF; keep the open source document as-is
+                }
+                $result.pdfExported = [IO.File]::Exists($PdfOutputPath)
+                if (!$result.pdfExported) { throw 'Office 未生成 PDF 预览。' }
+            }
+            catch { $result.pdfError = $_.Exception.Message }
+        }
     }
     catch { $result.error = $_.Exception.Message }
     finally {
@@ -363,8 +438,33 @@ function Test-OneDocument([string] $InputPath) {
             try {
                 # A user may have opened another document during the check.
                 # Quit only our confirmed instance and only when it is empty.
-                if ($owned -and $null -ne $documents -and $documents.Count -eq 0) { $app.Quit() }
-                else { $result.cleanupNote = '无法确认进程归属或已无其他文档，已保留 Office 窗口；没有强制终止进程。' }
+                if ($owned -and $null -ne $documents -and $documents.Count -eq 0) {
+                    $app.Quit()
+                }
+                elseif ($owned -and $null -ne $documents) {
+                    # A person may open a workbook into our new Excel instance.
+                    # Return its settings before leaving that session in place.
+                    $restoreErrors = @()
+                    if ($result.officeApplication -eq 'Excel.Application' -and $excelState) {
+                        foreach ($setting in @('Calculation', 'CalculateBeforeSave', 'AskToUpdateLinks', 'DisplayAlerts', 'AutomationSecurity', 'EnableEvents')) {
+                            if ($excelState.ContainsKey($setting)) {
+                                try { $app.$setting = $excelState[$setting] } catch { $restoreErrors += $setting }
+                            }
+                        }
+                    }
+                    elseif ($null -ne $initialAutomationSecurity) {
+                        try { $app.AutomationSecurity = $initialAutomationSecurity } catch { $restoreErrors += 'AutomationSecurity' }
+                    }
+                    try {
+                        if ($result.officeApplication -eq 'Excel.Application') { $app.Visible = $true }
+                        else { $app.Visible = -1 }
+                    }
+                    catch { [void][OfficeBridge.NativeWindow]::ShowWindow([IntPtr]$app.HWND, 5); $restoreErrors += 'Visible' }
+                    $restoreNote = if ($restoreErrors.Count) { 'Office 中还有其他文档，已保留窗口。部分临时设置未能恢复，请保存您自己的文档后关闭此 Office 窗口。' } else { 'Office 中还有其他文档，已保留窗口并恢复本次临时设置。' }
+                    $result.cleanupNote = (@($result.cleanupNote, $restoreNote) | Where-Object { $_ }) -join ' '
+
+                }
+                else { $result.cleanupNote = '无法确认进程归属，已保留 Office 窗口；没有强制终止进程。' }
             }
             catch { $result.cleanupNote = 'Office 无法自动退出；没有强制终止进程。' }
         }
@@ -383,9 +483,16 @@ function Test-OneDocument([string] $InputPath) {
         }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        if ($owned -and !$result.cleanupNote) {
+            try { [void]$process.WaitForExit(10000) } catch { }
+        }
     }
     return [pscustomobject]$result
 }
+
+if ($LibraryOnly) { return }
 
 if (-not $Path -or $Path.Count -eq 0) {
     $dialog = New-Object Windows.Forms.OpenFileDialog

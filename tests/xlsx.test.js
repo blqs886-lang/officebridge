@@ -673,3 +673,62 @@ test('guards private-use glyphs in cell, row, column and rich-text fonts, includ
     assert.ok(report.issues.some(i => i.code === 'SYMBOL_FONT_REVIEW' && i.title.includes(family) && !i.fixable), family);
   }
 });
+
+test('unwrapped merged and fixed-height text is kept out of ordinary font choices in both directions', async () => {
+  for (const [fontProfile, face, target] of [['windows-office', 'Helvetica Neue', 'Arial'], ['mac-office', 'Segoe UI', 'Helvetica Neue']]) {
+    const entries = readArchive(createDemo('xlsx')).entries;
+    const font = size => `<font><name val="${face}"/><sz val="${size}"/></font>`;
+    const sourceStyles = styles('<fonts><font><name val="Arial"/></font>' + [11, 12, 13, 14, 15].map(font).join('') + '</fonts>' +
+      '<cellXfs>' + [0, 1, 2, 3, 4, 5].map(id => `<xf fontId="${id}"/>`).join('') + '</cellXfs>');
+    const mergedText = '<c r="A2" s="2" t="inlineStr"><is><r><rPr><rFont val="' + face + '"/></rPr><t>合并区域</t></r></is></c>';
+    const sourceSheet = sheet('<sheetData>' +
+      '<row r="1">' + inline('A1', '普通', 's="1"') + '</row>' +
+      '<row r="2">' + mergedText + '</row>' +
+      '<row r="3" customHeight="1" ht="10">' + inline('A3', '固定', 's="3"') + '</row>' +
+      '<row r="4" customHeight="1" ht="10"><c r="A4" s="4"><f>1+1</f></c></row>' +
+      '<row r="5" hidden="1" customHeight="1" ht="10">' + inline('A5', '隐藏', 's="5"') + '</row>' +
+      '</sheetData><mergeCells><mergeCell ref="A2:B2"/></mergeCells>');
+    entries.set('xl/styles.xml', new TextEncoder().encode(sourceStyles));
+    entries.set('xl/worksheets/sheet1.xml', new TextEncoder().encode(sourceSheet));
+    entries.set('xl/worksheets/sheet2.xml', new TextEncoder().encode(sheet('<sheetData/>')));
+    const input = writeArchive(entries);
+    const options = { fontProfile };
+    const report = await analyzeOffice(input, 'geometry.xlsx', options);
+    const fixed = report.issues.find(item => item.part === 'xl/styles.xml' && item.fix?.affectsCellFit);
+    assert.match(fixed.evidence, /A3/);
+    const rich = report.issues.find(item => item.part === 'xl/worksheets/sheet1.xml' && item.fix?.affectsCellFit);
+    assert.match(rich.evidence, /A2/);
+    const ordinary = report.issues.find(item => item.fix?.layoutScope === 'other' && item.fix.from === face);
+    assert.ok(ordinary);
+    assert.ok(!ordinary.fix.affectsCellFit);
+    const result = await repairOffice(input, 'geometry.xlsx', { ...options, selectedIssueIds: [ordinary.id] });
+    const after = readArchive(result.bytes).entries;
+    // The fixed-height font, formula, merged rich run, and all dimensions survive
+    // a user choosing only the ordinary font occurrences from the same styles part.
+    const expected = sourceStyles.replace(font(11), font(11).replace(face, target))
+      .replace(font(12), font(12).replace(face, target)).replace(font(15), font(15).replace(face, target));
+    assert.equal(new TextDecoder().decode(after.get('xl/styles.xml')), expected);
+    for (const [part, bytes] of entries) if (part !== 'xl/styles.xml') assert.deepEqual(after.get(part), bytes, part);
+    assert.ok(result.report.issues.some(item => item.fix?.affectsCellFit));
+  }
+});
+
+test('a worksheet fixed default row height protects visible text but a row can opt back into automatic height', () => {
+  const result = inspect({
+    'xl/styles.xml': styles('<fonts><font><name val="Arial"/></font><font><name val="Menlo"/></font><font><name val="Monaco"/></font></fonts>' +
+      '<cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"/></cellXfs>'),
+    'xl/worksheets/sheet1.xml': sheet('<sheetFormatPr defaultRowHeight="9" customHeight="1"/><sheetData>' +
+      '<row r="1">' + inline('A1', '固定默认行高', 's="1"') + '</row>' +
+      '<row r="2" customHeight="0">' + inline('A2', '自动', 's="2"') + '</row></sheetData>'),
+  });
+  assert.deepEqual(result.issues.filter(item => item.fix?.affectsCellFit).map(item => item.fix.from), ['Menlo']);
+});
+
+test('Mac-target formula diagnostics describe the actual receiver and preserve version uncertainty', () => {
+  const report = inspect({
+    'xl/worksheets/sheet1.xml': sheet('<sheetData><row r="1">' + formula('A1', '_xlfn.XLOOKUP(1,B1:B4,C1:C4)') + '</row></sheetData>'),
+  }, { fontProfile: 'mac-office' });
+  const version = issue(report, 'FORMULA_VERSION_REQUIREMENT');
+  assert.match(version.description, /不代表公式损坏或 Mac 不支持/);
+  assert.equal(version.fixable, false);
+});

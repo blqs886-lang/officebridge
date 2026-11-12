@@ -85,18 +85,31 @@ jobs:
           if ($PSVersionTable.PSVersion.Major -ne 5) {
             throw 'This syntax check must use Windows PowerShell 5.1.'
           }
-          $script = (Resolve-Path '.\scripts\verify-windows.ps1').Path
-          $bytes = [IO.File]::ReadAllBytes($script)
-          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
-            throw 'Preserve the UTF-8 BOM so Windows PowerShell 5.1 reads Chinese messages correctly.'
-          }
-          $tokens = $null
-          $parseErrors = $null
-          [void][Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
-          if ($parseErrors.Count -gt 0) {
-            $parseErrors | Format-List
-            throw 'Windows checker syntax validation failed.'
+          foreach ($file in @('.\scripts\verify-windows.ps1', '.\scripts\office-check-windows.ps1')) {
+            $script = (Resolve-Path $file).Path
+            $bytes = [IO.File]::ReadAllBytes($script)
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              throw 'Preserve the UTF-8 BOM so Windows PowerShell 5.1 reads Chinese messages correctly.'
+            }
+            $tokens = $null
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | Format-List
+              throw "Windows checker syntax validation failed: $file"
+            }
           }
           Write-Host 'Syntax only: Office was not started; no Windows Office compatibility result is claimed.'
+      - name: Check Mac launchers without starting Office
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          /bin/bash -n OfficeBridge-Mac.command
+          node --check scripts/office-check-mac.js
+          node --check scripts/office-check-mac-office.js
+      - name: Package and verify release contents
+        run: |
+          npm run release:local
+          npm run release:verify
       # Deliberately no publish step and no artifact upload. In particular,
       # work/ may contain private local documents and must never be uploaded.

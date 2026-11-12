@@ -6,7 +6,7 @@ import { normalizeFontOptions } from './fonts.js';
 
 import { compareFontList } from './target-fonts.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 const mainTypes = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml',
@@ -185,9 +185,10 @@ async function buildReport(ctx) {
     inventory: { ...scanned.inventory, ...(comparison && { targetFontComparison: comparison }), packageParts: ctx.entries.size, expandedBytes: ctx.expandedBytes,
       externalRelationshipCount: ctx.externalRelationshipCount },
     repairBlocked: ctx.issues.some(i => i.severity === 'error'),
-    validation: { packageChecked: true, windowsOfficeTested: false,
+    validation: { packageChecked: true, windowsOfficeTested: false, targetOfficeTested: false,
+      targetPlatform: ctx.options.fontProfile === 'mac-office' ? 'mac' : 'windows',
       notes: ['已检查压缩包校验、XML 与内部关系；这不是完整 OOXML 架构验证。',
-        '未在目标 Windows Office 中打开，也未执行宏、公式、动画或媒体。',
+        `未在目标 ${ctx.options.fontProfile === 'mac-office' ? 'Mac' : 'Windows'} Office 中打开，也未执行宏、公式、动画或媒体。`,
         '字体替换仅修改名称，不安装或嵌入字体；字宽变化可能影响换行，仍需核对。',
         '未发现风险不代表全部兼容；当前规则不覆盖所有 Office 功能。'] },
   };
@@ -229,7 +230,8 @@ export async function repairOffice(bytes, fileName, options = {}) {
     entries.set(part, encodeXml(text, ctx.encodings.get(part)));
   }
   const output = writeArchive(entries);
-  const outputName = fileName.replace(/\.(pptx|xlsx)$/i, `.windows.$1`);
+  const target = ctx.options.fontProfile === 'mac-office' ? 'mac' : 'windows';
+  const outputName = fileName.replace(/\.(pptx|xlsx)$/i, `.${target}.$1`);
   const report = await analyzeOffice(output, outputName, options);
   if (report.repairBlocked) throw new Error('修复副本未通过内部结构检查，已停止输出。原文件不受影响。');
   const changedParts = new Set(changes.map(c => c.part));

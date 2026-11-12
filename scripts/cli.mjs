@@ -9,21 +9,22 @@ import { LIMITS } from '../src/engine/archive.js';
 const HELP = `OfficeBridge：本地批量检查与主动选择的字体替换
 
 用法：
-  node scripts/cli.mjs [check] <文件.pptx|文件.xlsx> [...] [--out 目录]
-  node scripts/cli.mjs repair <文件.pptx|文件.xlsx> [...] --accept-font-substitutions [--out 目录]
+  node scripts/cli.mjs [check] <文件.pptx|文件.xlsx> [...] [--target windows|mac] [--out 目录]
+  node scripts/cli.mjs repair <文件.pptx|文件.xlsx> [...] --accept-font-substitutions [--target windows|mac] [--out 目录]
 
-省略命令时只检查。默认输出目录为 ./officebridge-reports。
+省略命令时只检查。默认目标为 Windows；--target mac 检查发往 Mac 的文稿。
+默认输出目录为 ./officebridge-reports。
 含空格的路径请加引号；以 - 开头的文件路径请放在 -- 之后。
 
 check 保存 JSON 报告；警告不改变退出状态，结构错误会返回非零状态。
 repair 会采用报告中所有可用的字体替换建议，必须明确传入确认参数。
 替换可能改变换行、外观及版面。请先 check 并阅读报告，再决定是否采用。
-修复只生成 .windows.pptx / .windows.xlsx 副本及对应 JSON，不覆盖原文件。
+修复只生成 .windows.pptx / .windows.xlsx 或 .mac.pptx / .mac.xlsx 副本及对应 JSON，不覆盖原文件。
 签名、宏或结构异常文件仅保存检查报告；没有建议时也只保存报告。
 输出文件名保留中文和空格，但会替换 Windows 不允许的文件名字符。
 已有同名、大小写或 Unicode 规范化冲突的输出会被保留，该项任务会失败。
 单个失败不会阻断后续文件；退出码 0 表示完成，1 表示有文件失败，2 表示用法错误。
-全部处理在本机进行，不访问网络；检查结果不等同于 Windows Office 实测。
+全部处理在本机进行，不访问网络；检查结果不等同于 Windows Office 或 Mac Office 实测。
 `;
 
 class CliError extends Error {
@@ -36,12 +37,18 @@ function parseArguments(args) {
   const command = ['check', 'repair'].includes(rest[0]) ? rest.shift() : 'check';
   const files = [];
   let output = 'officebridge-reports';
+  let target = 'windows';
   let accepted = false;
   let positionalOnly = false;
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index];
     if (!positionalOnly && value === '--') { positionalOnly = true; continue; }
     if (!positionalOnly && value === '--accept-font-substitutions') { accepted = true; continue; }
+    if (!positionalOnly && (value === '--target' || value.startsWith('--target='))) {
+      target = value === '--target' ? rest[++index] : value.slice('--target='.length);
+      if (!['windows', 'mac'].includes(target)) throw new CliError('--target 必须是 windows 或 mac。');
+      continue;
+    }
     if (!positionalOnly && value === '--out') {
       output = rest[++index];
       if (!output || output.startsWith('--')) throw new CliError('--out 后需要提供输出目录。');
@@ -58,7 +65,7 @@ function parseArguments(args) {
   if (!files.length) throw new CliError('需要至少提供一个 PPTX 或 XLSX 文件。');
   if (command === 'repair' && !accepted) throw new CliError('repair 必须明确传入 --accept-font-substitutions；请先检查报告并了解字体替换对版面的影响。');
   if (command === 'check' && accepted) throw new CliError('--accept-font-substitutions 只能与 repair 一起使用；check 不修改文稿。');
-  return { command, files, output: path.resolve(output), accepted };
+  return { command, files, output: path.resolve(output), accepted, target };
 }
 
 function quoted(value) {
@@ -161,7 +168,7 @@ async function processFile(input, settings) {
   const name = path.basename(absolute);
   if (!/\.(?:pptx|xlsx)$/i.test(name)) throw new CliError('目前仅支持 .pptx 和 .xlsx；文件扩展名大小写均可。');
   const bytes = await readInput(absolute);
-  const options = { fontProfile: 'windows-office' };
+  const options = { fontProfile: `${settings.target}-office` };
   const report = await analyzeOffice(bytes, name, options);
   const originalReportName = `${portableName(name)}.report.json`;
   if (settings.command === 'check' || report.repairBlocked) {
@@ -216,7 +223,7 @@ async function main(args) {
       process.stderr.write(`处理失败：${quoted(path.basename(file))}；${quoted(errorMessage(error))}\n`);
     }
   }
-  process.stdout.write(`已保存 ${completed} 个输入的结果；${failures} 个输入失败或受阻。未进行 Windows Office 实测。\n`);
+  process.stdout.write(`已保存 ${completed} 个输入的结果；${failures} 个输入失败或受阻。未进行 ${settings.target === 'mac' ? 'Mac' : 'Windows'} Office 实测。\n`);
   return failures ? 1 : 0;
 }
 

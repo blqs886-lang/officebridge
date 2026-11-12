@@ -1,4 +1,5 @@
 import './style.css';
+import { nativeSection, bindNativeReport } from './ui/native-report.js';
 import { compareSection, bindComparison, openComparison } from './ui/pdf-compare.js';
 import { fontPairHint, unsupportedFileMessage } from './ui/input-help.js';
 import { bindFontList, renderFontList } from './ui/font-list.js';
@@ -11,7 +12,7 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024;
 const MAX_FILES = 20;
 const MAX_TOTAL_SIZE = 250 * 1024 * 1024;
 const WORKER_TIMEOUT_MS = 60_000;
-const state = { records: [], activeId: null, processing: false, filter: 'all', toastTimer: null, demoBusy: false };
+const state = { records: [], activeId: null, processing: false, filter: 'all', toastTimer: null, demoBusy: false, fontProfile: 'windows-office' };
 const pending = new Map();
 let nextRequest = 1;
 let nextRecord = 1;
@@ -109,7 +110,8 @@ document.querySelector('#app').innerHTML = `
     <span class="privacy-label">${icon('shield')} 文件只在本机处理</span>
   </div></header>
   <main class="page-shell" id="start">
-    <section class="hero" aria-labelledby="hero-title"><div><h1 id="hero-title">检查发到 Windows 的文件</h1><p class="hero-copy">看看字体、排版和播放有哪些地方要留意。需要换字体时，可另存一份可编辑的副本。</p></div></section>
+    <section class="hero" aria-labelledby="hero-title"><div><h1 id="hero-title">检查 Mac 与 Windows 之间的文件</h1><p class="hero-copy">选择接收文件的系统，检查字体和排版。用本机 Office 助手可以自动核对实际打开的效果。</p></div></section>
+    <div class="direction-picker"><label for="target-platform">文件要在哪里打开？</label><select id="target-platform"><option value="windows-office">Windows · 从 Mac 发过去</option><option value="mac-office">Mac · 从 Windows 发过去</option></select><span>用于接下来添加的文件</span></div>
     <section class="upload-section" aria-labelledby="upload-title">
       <div id="drop-zone" class="drop-zone"><div class="upload-icon">${icon('upload')}</div>
         <div class="upload-copy"><h2 id="upload-title">把演示文稿或表格拖到这里</h2><p>PowerPoint（.pptx）或 Excel（.xlsx），可一次选多个</p></div>
@@ -124,12 +126,13 @@ document.querySelector('#app').innerHTML = `
         <div id="file-list" class="file-list"></div><div class="queue-footer">${icon('shield')}<p>关闭页面会清空列表。请先下载需要的副本。</p></div></aside>
       <div id="document-panel" class="document-panel" aria-live="off"></div>
     </section>
+    ${nativeSection}
     ${compareSection}
     <details class="verification" id="verification"><summary>第一次用？查看操作指南</summary>
       <div class="verification-steps">
         <div><h3>从 Mac 导出</h3><p>在 Keynote 或 Numbers 里打开原稿，选择“文件”→“导出为”，选 PowerPoint 或 Excel。已有 PPTX 或 XLSX 可以直接拖进来。</p></div>
-        <div><h3>决定要不要换字体</h3><p>先在 Windows 打开原件。文字和分页都正常时，直接用原件。有错位时，再到检查结果里勾选相应字体，下载副本。</p></div>
-        <div><h3>打开下载的副本</h3><p>在浏览器的下载记录里找到文件名带 .windows 的副本。在 Windows 试播幻灯片；表格看打印预览，再改一个单元格、保存并重开。</p></div>
+        <div><h3>决定要不要换字体</h3><p>先在接收文件的电脑打开原件。文字和分页都正常时，直接用原件。有错位时，再到检查结果里勾选相应字体，下载副本。</p></div>
+        <div><h3>打开下载的副本</h3><p>在浏览器的下载记录里找到文件名带 .windows 或 .mac 的副本。在接收文件的电脑试播幻灯片；表格看打印预览，再改一个单元格、保存并重开。</p></div>
       </div><details class="scope-details"><summary>支持的文件与隐私</summary><div>
         <p>每份文件最多 100 MB，本次最多 20 份、合计 250 MB。检查支持标准 PPTX 和 XLSX。受保护或含宏的文件无法生成字体替换副本。</p>
         <p>浏览器在本机检查文件结构，字体替换可能改变换行和分页。实际效果请在接收方电脑上核对。下载的报告可能包含文件名、文字片段或链接，分享前请先查看。</p>
@@ -141,7 +144,13 @@ document.querySelector('#app').innerHTML = `
   <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 `;
 
-bindComparison();
+const comparison = bindComparison();
+bindNativeReport(comparison);
+document.querySelector('#target-platform').addEventListener('change', event => {
+  fileAction++;
+  state.fontProfile = event.target.value;
+  comparison.setDirection(state.fontProfile);
+});
 const fileInput = document.querySelector('#file-input');
 const workspace = document.querySelector('#workspace');
 const inputErrors = document.querySelector('#input-errors');
@@ -215,7 +224,7 @@ function enqueue(files, demo = false) {
     if (state.records.reduce((sum, item) => sum + item.file.size, 0) + file.size > MAX_TOTAL_SIZE) {
       errors.push(`${file.name}：当前批次总大小超过 250 MB，请先下载所需副本并清空列表。`); continue;
     }
-    const record = { id: String(nextRecord++), file, name: file.name, format: file.name.split('.').pop().toLowerCase(), status: 'queued', report: null, selected: new Set(), repaired: null, error: null, demo, options: { fontProfile: 'windows-office', fontMappings: {} }, advancedOpen: false, reanalysisError: null };
+    const record = { id: String(nextRecord++), file, name: file.name, format: file.name.split('.').pop().toLowerCase(), status: 'queued', report: null, selected: new Set(), repaired: null, error: null, demo, options: { fontProfile: state.fontProfile, fontMappings: {} }, advancedOpen: false, reanalysisError: null };
     state.records.push(record);
     added.push(record);
   }
@@ -268,7 +277,7 @@ async function loadDemo(format) {
   const action = ++fileAction;
   for (const button of document.querySelectorAll('.demo-row button')) button.disabled = true;
   try {
-    const bytes = await request('demo', { format });
+    const bytes = await request('demo', { format, options: {fontProfile: state.fontProfile} });
     // A newer file choice or a cleared queue takes precedence over this sample.
     if (action !== fileAction) return;
     const name = format === 'pptx' ? '跨系统交接示例.pptx' : '季度预算示例.xlsx';
@@ -319,18 +328,21 @@ function renderRecord(record) {
   if (record.id === state.activeId) renderDocument();
 }
 
+function targetName(record) { return record.options.fontProfile === 'mac-office' ? 'Mac' : 'Windows'; }
+
 function renderSummary(record, fixable, manual) {
+  const target = targetName(record);
   const blocked = record.report.repairBlocked;
-  let outcome = 'original', title = '先用原文件打开看看', text = '这次检查没有建议替换的字体。请在 Windows 打开原件核对显示和编辑，正常就可以直接用。';
+  let outcome = 'original', title = '先用原文件打开看看', text = `这次检查没有建议替换的字体。请在 ${target} 打开原件核对显示和编辑，正常就可以直接用。`;
   if (blocked) {
     outcome = 'blocked'; title = '这个文件只能检查';
     text = '请先在制作原稿的应用中处理下面的问题，再重新添加文件。';
   } else if (manual.length) {
-    outcome = 'review'; title = '先在 Windows 核对原件';
+    outcome = 'review'; title = `先在 ${target} 核对原件`;
     text = fixable.length ? '下面的内容需要实际打开查看。如果还遇到字体错位，可以选择字体做一份副本。' : '下面的内容需要实际打开查看。这次检查没有可供替换的字体。';
   } else if (fixable.length) {
     outcome = 'optional'; title = '原件显示正常，就可以直接用';
-    text = '如果在 Windows 看到文字错位或换行变化，可以试试下面的字体替换。';
+    text = `如果在 ${target} 看到文字错位或换行变化，可以试试下面的字体替换。`;
   }
   return `<div class="result-summary ${blocked ? 'blocked blocked-notice' : manual.length ? 'attention' : ''}" data-outcome="${outcome}">
     <span class="summary-icon">${icon(blocked ? 'shield' : manual.length ? 'warning' : 'check')}</span><div>
@@ -415,6 +427,7 @@ function renderDocument() {
   const pages = record.format === 'pptx' ? inventory.slideCount : inventory.worksheets?.length;
   const fontsCount = inventory.fonts?.length;
   panel.innerHTML = `${heading}
+    <div class="record-target"><label for="record-target">此文件的接收系统</label><select id="record-target" ${busy ? 'disabled' : ''}><option value="windows-office" ${record.options.fontProfile === 'windows-office' ? 'selected' : ''}>Windows</option><option value="mac-office" ${record.options.fontProfile === 'mac-office' ? 'selected' : ''}>Mac</option></select></div>
     ${renderSummary(record, fixable, manual)}
     <section class="repair-panel" ${groups.length ? '' : 'hidden'} aria-labelledby="repair-title">
       <div class="repair-panel-heading"><div><h3 id="repair-title">选择要替换的字体</h3><p>只勾选遇到问题的字体。修改会保存到新文件。</p></div></div>
@@ -434,6 +447,10 @@ function renderDocument() {
       <div class="report-export"><div><p>报告包含核对建议和已采用的修改，可另存后查看或打印。</p></div><div><button class="button secondary compact" id="download-html">${icon('download')} 下载可阅读的报告</button><button class="button secondary compact" id="download-json">下载 JSON</button></div></div>
       <details class="technical-details"><summary>文件信息与检查范围</summary><dl><div><dt>${record.format === 'pptx' ? '幻灯片' : '工作表'} / 声明字体</dt><dd>${pages ?? '—'} / ${fontsCount ?? '—'}</dd></div><div><dt>原文件 SHA-256</dt><dd class="hash">${esc(report.sha256 || '未提供')}</dd></div><div><dt>工具版本</dt><dd>${esc(report.toolVersion || '开发版')}</dd></div><div><dt>结构检查</dt><dd>${report.validation?.packageChecked ? '已执行' : '未完整执行'}</dd></div></dl>${(report.validation?.notes || []).length ? `<ul>${report.validation.notes.map(note => `<li>${esc(note)}</li>`).join('')}</ul>` : ''}</details>
     </details>`;
+  panel.querySelector('#record-target').addEventListener('change', event => {
+    const profile = event.target.value;
+    void reanalyzeWithOptions(record, () => ({fontProfile: profile, targetFonts: undefined, fontMappings: {}}));
+  });
   const findings = panel.querySelector('.findings-details');
   const exports = panel.querySelector('.report-details');
   findings.addEventListener('toggle', () => { if (findings.isConnected) record.findingsOpen = findings.open; });
@@ -489,7 +506,7 @@ function renderIssues(record) {
   list.innerHTML = issues.length ? issues.map((issue) => {
     const severity = ['error', 'warning', 'info'].includes(issue.severity) ? issue.severity : 'info';
     return `<article class="issue-card ${severity}"><div class="issue-main"><span class="issue-status">${icon(severity === 'info' ? 'info' : 'warning')}</span><div class="issue-content"><div class="issue-title"><h4>${esc(issue.title)}</h4><span class="severity-label">${({ error: '需处理', warning: '需复核', info: '提示' })[severity]}</span></div><p class="issue-description">${esc(issue.description)}</p><p class="issue-location"><span>位置</span>${esc(issue.location || issue.part || '文件整体')}</p>${issue.recommendation ? `<p class="issue-recommendation"><span>建议</span>${esc(issue.recommendation)}</p>` : ''}${issue.evidence || issue.part ? `<details class="issue-detail"><summary>查看检查依据</summary>${issue.evidence ? `<p>${esc(issue.evidence)}</p>` : ''}${issue.part ? `<code>${esc(issue.part)}</code>` : ''}<span class="issue-code">${esc(issue.code)}</span></details>` : ''}</div></div></article>`;
-  }).join('') : `<div class="no-issues">${icon('check')}<h4>${state.filter === 'all' ? '没有发现当前规则覆盖的风险' : '这个级别没有检查发现'}</h4><p>${state.filter === 'all' ? '这不代表已保证兼容。交接前请在目标 Windows 电脑验证。' : '可以切换筛选，查看其他发现。'}</p></div>`;
+  }).join('') : `<div class="no-issues">${icon('check')}<h4>${state.filter === 'all' ? '没有发现当前规则覆盖的风险' : '这个级别没有检查发现'}</h4><p>${state.filter === 'all' ? '这不代表已保证兼容。交接前请在目标电脑验证。' : '可以切换筛选，查看其他发现。'}</p></div>`;
 }
 
 function updateSelection(record, groups) {
@@ -504,7 +521,7 @@ function updateSelection(record, groups) {
   const summary = document.querySelector('#selection-summary');
   if (!summary) return;
   const selected = fixableIssues(record).filter(issue => record.selected.has(issue.id));
-  let caution = selected.length ? '下载后，在 Windows 对照原件检查换行和排版。' : '';
+  let caution = selected.length ? `下载后，在 ${targetName(record)} 对照原件检查换行和排版。` : '';
   if (selected.some(issue => issue.fix.affectsDefaultFont)) {
     caution = '已选择替换工作簿默认字体。实际列宽、自动行高和打印分页可能变化，请在下载后对比打印预览。';
   } else if (selected.some(issue => issue.fix.affectsWrappedRows)) {
@@ -525,8 +542,12 @@ function updateSelection(record, groups) {
   }
   const total = (record.repaired.changes || []).reduce((sum, change) => sum + (change.count || 0), 0);
   const unresolved = record.repaired.report?.issues?.length || 0;
-  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>替换了 ${total} 处字体。请在浏览器的下载记录中打开副本，用 Windows ${record.format === 'pptx' ? 'PowerPoint 试播' : 'Excel 检查打印预览'}。</p><p class="repaired-name">${esc(safeFileName(record.repaired.fileName))}</p><button class="button success" id="download-repaired">${icon('download')} 再次下载副本</button> <button type="button" id="compare-result" class="text-button">对照两份 PDF</button><p class="font-settings-error" id="copy-download-error" role="status" ${record.downloadError ? '' : 'hidden'}>${esc(record.downloadError || '')}</p><details class="changes-details"><summary>查看修改记录和复查结果</summary><p>复查还有 ${unresolved} 项提示，详情见检查报告。</p><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.location || change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
-  document.querySelector('#compare-result').addEventListener('click', openComparison);
+  result.innerHTML = `<div class="repair-success"><div class="repair-success-heading">${icon('check')}<strong>可编辑副本已生成</strong></div><p>替换了 ${total} 处字体。请在浏览器的下载记录中打开副本，用 ${targetName(record)} ${record.format === 'pptx' ? 'PowerPoint 试播' : 'Excel 检查打印预览'}。</p><p class="repaired-name">${esc(safeFileName(record.repaired.fileName))}</p><button class="button success" id="download-repaired">${icon('download')} 再次下载副本</button> <button type="button" id="compare-result" class="text-button">对照两份 PDF</button> <button type="button" id="native-result" class="text-button">用本机 Office 核对</button><p class="font-settings-error" id="copy-download-error" role="status" ${record.downloadError ? '' : 'hidden'}>${esc(record.downloadError || '')}</p><details class="changes-details"><summary>查看修改记录和复查结果</summary><p>复查还有 ${unresolved} 项提示，详情见检查报告。</p><ul>${(record.repaired.changes || []).map((change) => `<li><strong>${esc(change.before)} → ${esc(change.after)}</strong><span>${esc(change.location || change.part)} · ${change.count || 0} 处</span></li>`).join('')}</ul></details></div>`;
+  document.querySelector('#compare-result').addEventListener('click', () => { comparison.setDirection(record.options.fontProfile); openComparison(); });
+  document.querySelector('#native-result').addEventListener('click', () => {
+    const section = document.querySelector('#native-check');
+    section.open = true; section.querySelector('summary').focus();
+  });
   document.querySelector('#download-repaired').addEventListener('click', () => {
     downloadCopy(record);
   });

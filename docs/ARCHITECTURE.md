@@ -1,6 +1,6 @@
 # 架构与保真边界
 
-OfficeBridge v1.0.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；没有调用 Office 排版、重算或媒体播放引擎。
+OfficeBridge v1.1.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js CLI。目标是识别可说明证据的风险，并只修改用户明确选择的字体名称；浏览器引擎不调用 Office。可选的本机助手另外调用已安装的桌面 Office 打开文件和导出 PDF。
 
 ## 数据流
 
@@ -27,14 +27,16 @@ OfficeBridge v1.0.0 使用同一个 JavaScript 引擎服务浏览器与 Node.js 
 | `src/ui/reports.js` | 报告展示与导出；将文档提供的字符串作为数据处理 |
 | `src/engine/archive.js` | 校验 ZIP 元数据、拒绝不安全路径及资源超限、解压与打包 |
 | `src/engine/xml.js` | UTF-8 / UTF-16 解码、XML 检查、保留原 XML 表达方式的属性替换 |
-| `src/engine/fonts.js` | 有限的 Mac 字体名称建议与自定义映射校验；不读取字体文件 |
+| `src/engine/fonts.js` | 双向的 Windows / Mac 字体名称建议与自定义映射校验；不读取字体文件 |
 | `src/engine/pptx.js`、`xlsx.js` | 分格式的只读规则、证据与内容清单 |
 | `src/engine/index.js` | 统一接口、SHA-256、修复阻断、变更记录和输出复核 |
 | `scripts/cli.mjs` | 批量本地入口；排他输出和错误汇总 |
 | `scripts/build-portable.mjs` | 将构建产物内联为独立 HTML，限制网络连接 |
-| `scripts/verify-windows.ps1` | 可选的 Windows 桌面 Office 实际打开检查，独立于浏览器报告 |
+| `src/ui/native-report*.js` | 校验、显示本机助手记录及 PDF 指纹，衔接本地 PDF 对照 |
+| `scripts/office-check-windows.ps1`、`verify-windows.ps1` | Windows 文件选择界面、独立工作副本、桌面 Office 打开、PDF 与分页结果 |
+| `scripts/office-check-mac.js` | Mac 本机助手，使用系统自动化与已安装的 Office 导出结果 |
 
-数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v1.0.0 的主要目标是 Windows Office 常见字体环境；可按用户导入的目标名单筛选建议。完整名单留在当前文件的会话中。
+数据模型见 [ENGINE-CONTRACT.md](ENGINE-CONTRACT.md)。v1.1.0 提供 `windows-office` 与 `mac-office` 两种目标字体环境；可按用户导入的目标名单筛选建议。完整名单留在当前文件的会话中。
 
 ## 修改哪些内容
 
@@ -68,4 +70,4 @@ PPTX 文本检查只处理有限的显式坐标、换行和字号。旋转、分
 
 1. **自动化测试**：合成文稿、规则边界、异常 ZIP/XML、原件不变及未修改部件保真。
 2. **浏览器流程**：macOS Chrome 中的样例、选择、报告、修复和下载；不能替代 Office 渲染测试。
-3. **目标环境**：真实 Windows Office 打开、人工查看、编辑、重算与播放。当前尚未完成这一层验证；可选脚本范围见 [WINDOWS-VERIFICATION.md](WINDOWS-VERIFICATION.md)。
+3. **目标环境**：在指定 Mac / Windows 桌面 Office 中打开选定合成文件，导出 PDF，再做编辑、重算或播放验证。已完成与未覆盖的范围分别记录在 [TESTING.md](TESTING.md)，不把单一电脑结果推广为全平台保证。助手步骤见 [NATIVE-OFFICE-CHECK.md](NATIVE-OFFICE-CHECK.md)。

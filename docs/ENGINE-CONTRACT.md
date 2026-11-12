@@ -6,7 +6,7 @@
 
 Report fields: `schemaVersion: 1`, `toolVersion`, `fileName`, `format: 'pptx'|'xlsx'`,
 `sha256`, `fileSize`, `issues: Issue[]`, `inventory`, `repairBlocked: boolean`,
-`validation: { packageChecked, windowsOfficeTested: false, notes: string[] }`.
+`validation: { packageChecked, targetPlatform, targetOfficeTested: false, windowsOfficeTested: false, notes: string[] }`.
 
 Issue: `{ id, code, severity: 'warning'|'info'|'error', title, description,
 location: string, part: string, fixable: boolean, defaultSelected: boolean,
@@ -23,7 +23,7 @@ to check the actual page count and appearance.
 Format scanner exports `scanPptx(context)` / `scanXlsx(context)` returning
 `{ issues, inventory }`. Context is `{ entries: Map<string, Uint8Array>,
 xml: Map<string, Document>, texts: Map<string, string>, options }`.
-Options: `{ fontProfile: 'windows-office', fontMappings?: object, targetFonts?: string[] }`. With a target list, reports include only the count and document family matches under `inventory.targetFontComparison`. The caller keeps the list for repair.
+Options: `{ fontProfile: 'windows-office'|'mac-office', fontMappings?: object, targetFonts?: string[] }`. With a target list, reports include only the count and document family matches under `inventory.targetFontComparison`. The caller keeps the list for repair.
 Scanners only inspect. Issue IDs use the code, part and family ordinal. When a
 single source font in one namespace and part has separately selectable groups,
 all its choices retain that ordinal and append their own `fix.layoutScope`.
@@ -52,3 +52,7 @@ Do not rewrite formulas, external paths, media, theme refs, dimensions or unknow
 Core rejects macros for repair (pptm/xlsm unsupported), signatures, dangerous ZIP
 paths, zip bombs, XML DTD/entities, duplicate entries and malformed relationships.
 Existing unknown part bytes are retained. Package-level inventory from core is merged.
+
+## Local Office records
+
+The native helpers produce a separate `officebridge-native-check`, schema version 1 record. It is never merged into the rule scanner's `targetOfficeTested` flags. An imported native record identifies one execution environment and the original/copy fingerprints. The reader verifies embedded PDF data against its SHA-256 before rendering; this is an integrity check, not proof of who authored the record. The result HTML embeds JSON as non-executable, escaped text. Native checks use the installed Office application and are not an untrusted-document sandbox.
